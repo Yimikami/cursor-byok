@@ -84,11 +84,12 @@ func main() {
 		case "quit":
 			// Tear down the proxy before letting the window close so the
 			// system proxy / Cursor settings get reverted cleanly. Let the
-			// close event proceed — app.Quit ensures the process exits
-			// even on macOS where a closed window wouldn't otherwise.
+			// close event proceed — os.Exit ensures the process exits
+			// instantly without waiting for Wails to figure it out.
 			go func() {
+				window.Hide()
 				proxySvc.Shutdown()
-				app.Quit()
+				os.Exit(0)
 			}()
 		default:
 			// No pinned preference yet. Keep the window visible while the
@@ -106,8 +107,11 @@ func main() {
 		window.Hide()
 	})
 	proxySvc.SetQuitCallback(func() {
-		proxySvc.Shutdown()
-		app.Quit()
+		go func() {
+			window.Hide()
+			proxySvc.Shutdown()
+			os.Exit(0)
+		}()
 	})
 
 	// ---------------- System tray ----------------
@@ -153,8 +157,11 @@ func main() {
 	})
 	menu.AddSeparator()
 	menu.Add("Quit").OnClick(func(_ *application.Context) {
-		proxySvc.Shutdown()
-		app.Quit()
+		go func() {
+			window.Hide()
+			proxySvc.Shutdown()
+			os.Exit(0)
+		}()
 	})
 
 	tray.SetMenu(menu)
