@@ -7,8 +7,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -54,6 +56,7 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsCfg}
 
 	p := goproxy.NewProxyHttpServer()
+	p.Verbose = os.Getenv("DEBUG") == "1"
 	p.OnRequest().HandleConnect(goproxy.AlwaysMitm)
 
 	// Mimic the working app's "everything secondary is 404" strategy. Cursor
@@ -97,6 +100,9 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 		"/aiserver.v1.AiService/GetDefaultModelNudgeData": {},
 	}
 	mockProto := func(req *http.Request, body []byte) *http.Response {
+		if p.Verbose {
+			log.Printf("[MOCK PROTO] 200 %s (%d bytes)", req.URL.Path, len(body))
+		}
 		return &http.Response{
 			Status:        "200 OK",
 			StatusCode:    http.StatusOK,
@@ -106,12 +112,18 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 			Body:          io.NopCloser(bytes.NewReader(body)),
 			ContentLength: int64(len(body)),
 			Header: http.Header{
-				"Content-Type": {"application/proto"},
+				"Content-Type":                 {"application/proto"},
+				"Access-Control-Allow-Origin":  {"*"},
+				"Access-Control-Allow-Methods": {"*"},
+				"Access-Control-Allow-Headers": {"*"},
 			},
 			Request: req,
 		}
 	}
 	mock404 := func(req *http.Request) *http.Response {
+		if p.Verbose {
+			log.Printf("[MOCK] 404 Not Found %s", req.URL.Path)
+		}
 		body := "404 page not found\n"
 		return &http.Response{
 			Status:        "404 Not Found",
@@ -129,6 +141,23 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 		}
 	}
 	p.OnRequest().DoFunc(func(req *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		if p.Verbose {
+			log.Printf("[REQ] %s %s (CT: %s)", req.Method, req.URL.String(), req.Header.Get("Content-Type"))
+		}
+		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" {
+			return req, &http.Response{
+				StatusCode: http.StatusNoContent,
+				Status:     "204 No Content",
+				Header: http.Header{
+					"Access-Control-Allow-Origin":  {"*"},
+					"Access-Control-Allow-Methods": {"GET,POST,PUT,PATCH,DELETE,OPTIONS"},
+					"Access-Control-Allow-Headers": {"*"},
+					"Access-Control-Max-Age":       {"86400"},
+				},
+				Body:    io.NopCloser(strings.NewReader("")),
+				Request: req,
+			}
+		}
 		host := req.URL.Host
 		path := req.URL.Path
 		_, isAuthHost := authHosts[host]
@@ -205,6 +234,9 @@ func handleBidiAppend(req *http.Request) *http.Response {
 	if res.ContentType != "" {
 		hdr.Set("Content-Type", res.ContentType)
 	}
+	hdr.Set("Access-Control-Allow-Origin", "*")
+	hdr.Set("Access-Control-Allow-Methods", "*")
+	hdr.Set("Access-Control-Allow-Headers", "*")
 	return &http.Response{
 		Status:        http.StatusText(res.Status),
 		StatusCode:    res.Status,
@@ -239,6 +271,9 @@ func handleRunSSE(req *http.Request, resolver agent.AdapterResolver) *http.Respo
 			hdr.Add(k, v)
 		}
 	}
+	hdr.Set("Access-Control-Allow-Origin", "*")
+	hdr.Set("Access-Control-Allow-Methods", "*")
+	hdr.Set("Access-Control-Allow-Headers", "*")
 	return &http.Response{
 		Status:     "200 OK",
 		StatusCode: http.StatusOK,
