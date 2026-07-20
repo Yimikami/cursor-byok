@@ -23,7 +23,7 @@ type AdapterInfo struct {
 	ModelID         string
 	BaseURL         string
 	APIKey          string
-	ReasoningEffort string
+	SupportedThinkingLevels []string
 	ServiceTier     string
 	MaxOutputTokens int
 	ThinkingBudget  int

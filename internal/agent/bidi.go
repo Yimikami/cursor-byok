@@ -163,6 +163,7 @@ func extractIntoSession(sess *Session, acm *agentv1.AgentClientMessage) {
 	if run := acm.GetRunRequest(); run != nil {
 		sess.Run = run
 		sess.ModelDetails = run.GetModelDetails()
+		sess.RequestedModel = run.GetRequestedModel()
 		sess.State = run.GetConversationState()
 		if cid := run.GetConversationId(); cid != "" {
 			sess.ConversationID = cid

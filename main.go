@@ -3,6 +3,8 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
+	"runtime"
 
 	"cursor-byok/internal/bridge"
 
@@ -33,6 +35,11 @@ func init() {
 }
 
 func main() {
+	// Fix WebKitGTK buffer creation issues on Linux
+	if runtime.GOOS == "linux" {
+		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+	}
+
 	proxySvc, err := bridge.NewProxyService()
 	if err != nil {
 		log.Fatalf("failed to init proxy service: %v", err)
@@ -67,6 +74,12 @@ func main() {
 		URL:              "/",
 	})
 
+	forceQuit := func() {
+		window.Hide()
+		proxySvc.Shutdown()
+		os.Exit(0)
+	}
+
 	// Clicking the window close button routes through the user's saved
 	// preference. First-run = unset → cancel the close and ask the frontend
 	// to show the "Quit or minimize to tray?" modal. After the user picks
@@ -80,12 +93,9 @@ func main() {
 		case "quit":
 			// Tear down the proxy before letting the window close so the
 			// system proxy / Cursor settings get reverted cleanly. Let the
-			// close event proceed — app.Quit ensures the process exits
-			// even on macOS where a closed window wouldn't otherwise.
-			go func() {
-				proxySvc.Shutdown()
-				app.Quit()
-			}()
+			// close event proceed — os.Exit ensures the process exits
+			// instantly without waiting for Wails to figure it out.
+			go forceQuit()
 		default:
 			// No pinned preference yet. Keep the window visible while the
 			// frontend modal is open so the user can see what they're
@@ -101,10 +111,7 @@ func main() {
 	proxySvc.SetHideCallback(func() {
 		window.Hide()
 	})
-	proxySvc.SetQuitCallback(func() {
-		proxySvc.Shutdown()
-		app.Quit()
-	})
+	proxySvc.SetQuitCallback(forceQuit)
 
 	// ---------------- System tray ----------------
 	tray := app.SystemTray.New()
@@ -149,8 +156,7 @@ func main() {
 	})
 	menu.AddSeparator()
 	menu.Add("Quit").OnClick(func(_ *application.Context) {
-		proxySvc.Shutdown()
-		app.Quit()
+		go forceQuit()
 	})
 
 	tray.SetMenu(menu)

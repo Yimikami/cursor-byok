@@ -50,7 +50,7 @@ type ModelAdapter = {
   apiKey: string;
   modelID: string;
   contextWindow?: string;
-  reasoningEffort?: string;
+  supportedThinkingLevels?: string[];
   serviceTier?: string;
   maxOutputTokens?: string;
   thinkingBudget?: string;
@@ -126,8 +126,8 @@ const HELP = {
     "Provider endpoint. Override for proxies / reverse proxies / Azure OpenAI.",
   contextWindow:
     "Max input tokens sent to the provider. Leave blank to use the provider default.",
-  reasoningEffort:
-    "Reasoning budget hint for OpenAI reasoning models (o1, o3, gpt-5 series).",
+  supportedThinkingLevels:
+    "Select what thinking/reasoning levels are supported natively by this model. Default is none, minimal, low, medium, high, xhigh. Checked levels appear as native options in Cursor.",
   fastMode:
     "Use priority service tier for faster responses (OpenAI). Costs more per token.",
   maxOutput:
@@ -402,7 +402,7 @@ function openEditor(i: number) {
       apiKey: "",
       modelID: "",
       contextWindow: "",
-      reasoningEffort: "medium",
+      supportedThinkingLevels: providerTab.value === "openai" ? ["none", "minimal", "low", "medium", "high", "xhigh"] : [],
       serviceTier: "",
       maxOutputTokens: "",
       thinkingBudget: "",
@@ -413,6 +413,9 @@ function openEditor(i: number) {
     const src = cfg.value.modelAdapters[i];
     editorProvider.value = src.type === "anthropic" ? "anthropic" : "openai";
     editorModel.value = JSON.parse(JSON.stringify(src));
+    if (editorModel.value && !editorModel.value.supportedThinkingLevels) {
+      editorModel.value.supportedThinkingLevels = editorProvider.value === "openai" ? ["none", "minimal", "low", "medium", "high", "xhigh"] : [];
+    }
   }
   showApiKey.value = false;
   currentView.value = "editor";
@@ -424,6 +427,12 @@ function cancelEditor() {
 
 async function saveEditor(runTest = false) {
   if (!editorModel.value) return;
+  
+  if (editorModel.value.supportedThinkingLevels) {
+    const order: Record<string, number> = { none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5 };
+    editorModel.value.supportedThinkingLevels.sort((a, b) => (order[a] ?? 99) - (order[b] ?? 99));
+  }
+
   editorModel.value.type = editorProvider.value;
   if (editorIndex.value === -1) {
     cfg.value.modelAdapters.push(editorModel.value);
@@ -1257,18 +1266,17 @@ onBeforeUnmount(() => {
           </div>
           <div v-if="editorProvider === 'openai'" class="field">
             <label
-              >Reasoning effort
-              <span class="info" :data-tip="HELP.reasoningEffort"
+              >Supported Thinking Levels (Cursor)
+              <span class="info" :data-tip="HELP.supportedThinkingLevels"
                 >i</span
               ></label
             >
-            <select v-model="editorModel.reasoningEffort">
-              <option value="none">None</option>
-              <option value="low">Low</option>
-              <option value="medium">Medium</option>
-              <option value="high">High</option>
-              <option value="xhigh">XHigh</option>
-            </select>
+            <div class="thinking-levels-select" style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px;">
+              <label v-for="lvl in ['none', 'minimal', 'low', 'medium', 'high', 'xhigh']" :key="lvl" class="thinking-level-option">
+                <input type="checkbox" :value="lvl" v-model="editorModel.supportedThinkingLevels">
+                {{ lvl }}
+              </label>
+            </div>
             <label class="fast-toggle">
               <input
                 type="checkbox"
@@ -2274,6 +2282,20 @@ onBeforeUnmount(() => {
   height: 16px;
   accent-color: var(--brand);
   margin: 0;
+}
+.thinking-level-option {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px !important;
+  color: var(--fg2) !important;
+}
+.thinking-level-option input[type="checkbox"] {
+  width: 16px !important;
+  height: 16px !important;
+  accent-color: var(--brand);
+  margin: 0 !important;
 }
 .field label {
   font-size: 12px;

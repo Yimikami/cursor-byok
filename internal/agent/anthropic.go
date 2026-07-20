@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -466,6 +468,27 @@ func streamAnthropic(
 			Type:         "enabled",
 			BudgetTokens: opts.ThinkingBudget,
 		}
+	}
+	if os.Getenv("DEBUG") == "1" {
+		sys, usr, ast, tol := 0, 0, 0, 0
+		for _, m := range messages {
+			switch m.Role {
+			case "system":
+				sys++
+			case "user":
+				usr++
+			case "assistant":
+				ast++
+			case "tool":
+				tol++
+			}
+		}
+		thinkingBudget := 0
+		if req.Thinking != nil {
+			thinkingBudget = req.Thinking.BudgetTokens
+		}
+		log.Printf("[ANTHROPIC REQ] Model: %s | ThinkingBudget: %d | MaxTokens: %d | Tools: %d | Messages: %d (sys:%d, usr:%d, ast:%d, tol:%d)",
+			req.Model, thinkingBudget, req.MaxTokens, len(req.Tools), len(messages), sys, usr, ast, tol)
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
