@@ -3,6 +3,7 @@ package main
 import (
 	"embed"
 	"log"
+	"os"
 
 	"cursor-byok/internal/bridge"
 
@@ -33,6 +34,9 @@ func init() {
 }
 
 func main() {
+	// Fix WebKitGTK buffer creation issues on Linux
+	os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+
 	proxySvc, err := bridge.NewProxyService()
 	if err != nil {
 		log.Fatalf("failed to init proxy service: %v", err)
