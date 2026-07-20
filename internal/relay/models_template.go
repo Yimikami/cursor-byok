@@ -155,12 +155,7 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 	for _, lvl := range supportedThinkingLevels {
 		valDef := make([]byte, 0, 32)
 		valDef = appendString(valDef, 1, lvl)
-		displayName := strings.ToUpper(lvl[:1]) + lvl[1:]
-		if lvl == "xhigh" {
-			displayName = "Extra High"
-		} else if lvl == "none" {
-			displayName = "None"
-		}
+		displayName := thinkingLevelDisplayName(lvl)
 		valDef = appendString(valDef, 2, displayName)
 
 		enumDef = protowire.AppendTag(enumDef, protowire.Number(1), protowire.BytesType)
@@ -183,6 +178,19 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 	out = protowire.AppendVarint(out, uint64(len(paramDef)))
 	out = append(out, paramDef...)
 
+	// Determine default variant by canonical priority
+	canonicalOrder := map[string]int{
+		"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5,
+	}
+	defaultVariantIdx := 0
+	bestRank := 99
+	for i, lvl := range supportedThinkingLevels {
+		if rank, ok := canonicalOrder[lvl]; ok && rank < bestRank {
+			bestRank = rank
+			defaultVariantIdx = i
+		}
+	}
+
 	// Tag 30: variants (repeated ModelVariantConfig)
 	for i, lvl := range supportedThinkingLevels {
 		variant := make([]byte, 0, 64)
@@ -197,12 +205,7 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 		variant = append(variant, paramVal...)
 
 		// 2: display_name
-		variantDisplayName := strings.ToUpper(lvl[:1]) + lvl[1:]
-		if lvl == "xhigh" {
-			variantDisplayName = "Extra High"
-		} else if lvl == "none" {
-			variantDisplayName = "None"
-		}
+		variantDisplayName := thinkingLevelDisplayName(lvl)
 		variant = appendString(variant, 2, variantDisplayName)
 
 		// 3: is_max_mode
@@ -212,7 +215,7 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 		variant = appendBool(variant, 4, false)
 
 		// 5: is_default_non_max_config
-		variant = appendBool(variant, 5, i == 0)
+		variant = appendBool(variant, 5, i == defaultVariantIdx)
 
 		out = protowire.AppendTag(out, protowire.Number(30), protowire.BytesType)
 		out = protowire.AppendVarint(out, uint64(len(variant)))
@@ -255,3 +258,17 @@ func appendBool(buf []byte, field int, v bool) []byte {
 	}
 	return protowire.AppendVarint(buf, 0)
 }
+
+func thinkingLevelDisplayName(lvl string) string {
+	if lvl == "xhigh" {
+		return "Extra High"
+	}
+	if lvl == "none" {
+		return "None"
+	}
+	if len(lvl) > 0 {
+		return strings.ToUpper(lvl[:1]) + lvl[1:]
+	}
+	return ""
+}
+
