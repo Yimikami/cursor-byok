@@ -25,6 +25,7 @@ type Session struct {
 	BugBotRequest  *aiserverv1.StreamBugBotRequest
 	Mode           agentv1.AgentMode
 	ModelDetails   *agentv1.ModelDetails
+	RequestedModel *agentv1.RequestedModel
 	Action         *agentv1.ConversationAction
 	State          *agentv1.ConversationStateStructure
 	Run            *agentv1.AgentRunRequest

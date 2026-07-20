@@ -67,7 +67,7 @@ func adapterListFromConfig(c UserConfig) []relay.AdapterInfo {
 			ModelID:         a.ModelID,
 			BaseURL:         a.BaseURL,
 			APIKey:          a.APIKey,
-			ReasoningEffort: a.ReasoningEffort,
+			SupportedThinkingLevels: a.SupportedThinkingLevels,
 			ServiceTier:     a.ServiceTier,
 			MaxOutputTokens: parseIntSafe(a.MaxOutputTokens),
 			ThinkingBudget:  parseIntSafe(a.ThinkingBudget),

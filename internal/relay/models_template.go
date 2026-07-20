@@ -1,7 +1,10 @@
 package relay
 
-import "google.golang.org/protobuf/encoding/protowire"
+import (
+	"strings"
 
+	"google.golang.org/protobuf/encoding/protowire"
+)
 // buildGetDefaultModelNudgeDataResponse mirrors the working app's reply to
 // /aiserver.v1.AiService/GetDefaultModelNudgeData. Capture format (21 B):
 //
@@ -46,7 +49,7 @@ func buildAvailableModelsResponse(adapters []AdapterInfo) []byte {
 			display = a.ModelID
 		}
 		// AvailableModel (repeated, field 2)
-		modelBytes := buildAvailableModel(hexID, display)
+		modelBytes := buildAvailableModel(hexID, display, a.SupportedThinkingLevels)
 		buf = protowire.AppendTag(buf, protowire.Number(2), protowire.BytesType)
 		buf = protowire.AppendVarint(buf, uint64(len(modelBytes)))
 		buf = append(buf, modelBytes...)
@@ -89,7 +92,7 @@ func buildAvailableModelsResponse(adapters []AdapterInfo) []byte {
 
 // buildAvailableModel constructs one AvailableModel sub-message body matching
 // the working app's exact field selection.
-func buildAvailableModel(hexID, display string) []byte {
+func buildAvailableModel(hexID, display string, supportedThinkingLevels []string) []byte {
 	out := make([]byte, 0, 128)
 	// 1: name (bytes) = hexID
 	out = appendString(out, 1, hexID)
@@ -131,12 +134,91 @@ func buildAvailableModel(hexID, display string) []byte {
 	out = appendString(out, 24, display)
 	// 25: supports_sandboxing (varint) = true
 	out = appendBool(out, 25, true)
-	// 38: BYOK-eligible flag (varint = 1). Working app emits this on every
-	// AvailableModel — without it Cursor's picker filters the model out as
-	// "not eligible for your account" even though the outer Pro flags are
-	// set. Decoded byte-for-byte from the working app's 360-byte response
-	// (tag 0xb0 0x02 = field 38 varint, value 0x01).
+	// 38: BYOK-eligible flag (varint = 1).
 	out = appendBool(out, 38, true)
+
+	if len(supportedThinkingLevels) > 0 {
+		out = appendThinkingConfig(out, hexID, display, supportedThinkingLevels)
+	}
+
+	return out
+}
+
+func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLevels []string) []byte {
+	// Tag 29: parameter_definitions (repeated ModelParameterDefinition)
+	paramDef := make([]byte, 0, 128)
+	paramDef = appendString(paramDef, 1, "reasoning")
+	paramDef = appendString(paramDef, 2, "Reasoning Effort")
+
+	// 4: EnumParameterDefinition
+	enumDef := make([]byte, 0, 64)
+	for _, lvl := range supportedThinkingLevels {
+		valDef := make([]byte, 0, 32)
+		valDef = appendString(valDef, 1, lvl)
+		displayName := strings.ToUpper(lvl[:1]) + lvl[1:]
+		if lvl == "xhigh" {
+			displayName = "Extra High"
+		} else if lvl == "none" {
+			displayName = "None"
+		}
+		valDef = appendString(valDef, 2, displayName)
+
+		enumDef = protowire.AppendTag(enumDef, protowire.Number(1), protowire.BytesType)
+		enumDef = protowire.AppendVarint(enumDef, uint64(len(valDef)))
+		enumDef = append(enumDef, valDef...)
+	}
+
+	// ModelParameterType has enum_parameter as tag 2
+	paramType := make([]byte, 0, 64)
+	paramType = protowire.AppendTag(paramType, protowire.Number(2), protowire.BytesType)
+	paramType = protowire.AppendVarint(paramType, uint64(len(enumDef)))
+	paramType = append(paramType, enumDef...)
+
+	// ModelParameterDefinition has parameter_type as tag 4
+	paramDef = protowire.AppendTag(paramDef, protowire.Number(4), protowire.BytesType)
+	paramDef = protowire.AppendVarint(paramDef, uint64(len(paramType)))
+	paramDef = append(paramDef, paramType...)
+
+	out = protowire.AppendTag(out, protowire.Number(29), protowire.BytesType)
+	out = protowire.AppendVarint(out, uint64(len(paramDef)))
+	out = append(out, paramDef...)
+
+	// Tag 30: variants (repeated ModelVariantConfig)
+	for i, lvl := range supportedThinkingLevels {
+		variant := make([]byte, 0, 64)
+
+		// 1: parameter_values (repeated RequestedModel.ModelParameterValue)
+		paramVal := make([]byte, 0, 32)
+		paramVal = appendString(paramVal, 1, "reasoning")
+		paramVal = appendString(paramVal, 2, lvl)
+
+		variant = protowire.AppendTag(variant, protowire.Number(1), protowire.BytesType)
+		variant = protowire.AppendVarint(variant, uint64(len(paramVal)))
+		variant = append(variant, paramVal...)
+
+		// 2: display_name
+		variantDisplayName := strings.ToUpper(lvl[:1]) + lvl[1:]
+		if lvl == "xhigh" {
+			variantDisplayName = "Extra High"
+		} else if lvl == "none" {
+			variantDisplayName = "None"
+		}
+		variant = appendString(variant, 2, variantDisplayName)
+
+		// 3: is_max_mode
+		variant = appendBool(variant, 3, false)
+
+		// 4: is_default_max_config
+		variant = appendBool(variant, 4, false)
+
+		// 5: is_default_non_max_config
+		variant = appendBool(variant, 5, i == 0)
+
+		out = protowire.AppendTag(out, protowire.Number(30), protowire.BytesType)
+		out = protowire.AppendVarint(out, uint64(len(variant)))
+		out = append(out, variant...)
+	}
+
 	return out
 }
 

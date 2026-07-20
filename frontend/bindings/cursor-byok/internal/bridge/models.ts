@@ -99,7 +99,11 @@ export class ModelAdapterConfig {
     "apiKey": string;
     "modelID": string;
     "contextWindow"?: string;
-    "reasoningEffort"?: string;
+
+    /**
+     * "none", "minimal", "low", "medium", "high", "xhigh"
+     */
+    "supportedThinkingLevels"?: string[];
     "serviceTier"?: string;
     "maxOutputTokens"?: string;
     "thinkingBudget"?: string;
@@ -132,7 +136,11 @@ export class ModelAdapterConfig {
      * Creates a new ModelAdapterConfig instance from a string or object.
      */
     static createFrom($$source: any = {}): ModelAdapterConfig {
+        const $$createField6_0 = $$createType0;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
+        if ("supportedThinkingLevels" in $$parsedSource) {
+            $$parsedSource["supportedThinkingLevels"] = $$createField6_0($$parsedSource["supportedThinkingLevels"]);
+        }
         return new ModelAdapterConfig($$parsedSource as Partial<ModelAdapterConfig>);
     }
 }
@@ -269,8 +277,8 @@ export class UsageStats {
      * Creates a new UsageStats instance from a string or object.
      */
     static createFrom($$source: any = {}): UsageStats {
-        const $$createField5_0 = $$createType1;
-        const $$createField6_0 = $$createType3;
+        const $$createField5_0 = $$createType2;
+        const $$createField6_0 = $$createType4;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("perModel" in $$parsedSource) {
             $$parsedSource["perModel"] = $$createField5_0($$parsedSource["perModel"]);
@@ -312,7 +320,7 @@ export class UserConfig {
      * Creates a new UserConfig instance from a string or object.
      */
     static createFrom($$source: any = {}): UserConfig {
-        const $$createField1_0 = $$createType5;
+        const $$createField1_0 = $$createType6;
         let $$parsedSource = typeof $$source === 'string' ? JSON.parse($$source) : $$source;
         if ("modelAdapters" in $$parsedSource) {
             $$parsedSource["modelAdapters"] = $$createField1_0($$parsedSource["modelAdapters"]);
@@ -322,9 +330,10 @@ export class UserConfig {
 }
 
 // Private type creation functions
-const $$createType0 = ModelUsageEntry.createFrom;
-const $$createType1 = $Create.Array($$createType0);
-const $$createType2 = DailyUsageEntry.createFrom;
-const $$createType3 = $Create.Array($$createType2);
-const $$createType4 = ModelAdapterConfig.createFrom;
-const $$createType5 = $Create.Array($$createType4);
+const $$createType0 = $Create.Array($Create.Any);
+const $$createType1 = ModelUsageEntry.createFrom;
+const $$createType2 = $Create.Array($$createType1);
+const $$createType3 = DailyUsageEntry.createFrom;
+const $$createType4 = $Create.Array($$createType3);
+const $$createType5 = ModelAdapterConfig.createFrom;
+const $$createType6 = $Create.Array($$createType5);

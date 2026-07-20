@@ -87,7 +87,6 @@ func AdapterTargetFromRelay(a relay.AdapterInfo) AdapterTarget {
 		StableID:     a.StableID(),
 		DisplayName:  a.DisplayName,
 		Opts: AdapterOpts{
-			ReasoningEffort: a.ReasoningEffort,
 			ServiceTier:     a.ServiceTier,
 			MaxOutputTokens: a.MaxOutputTokens,
 			ThinkingBudget:  a.ThinkingBudget,
@@ -100,6 +99,7 @@ func ResolveAdapterForModel(adapters []AdapterTarget, requested string) (Adapter
 		return AdapterTarget{}, false
 	}
 	requested = strings.TrimSpace(requested)
+
 	if requested != "" {
 		for _, a := range adapters {
 			if strings.EqualFold(requested, a.StableID) || strings.EqualFold(requested, a.Model) || (a.DisplayName != "" && strings.EqualFold(requested, a.DisplayName)) {
@@ -120,7 +120,15 @@ func ResolveAdapterForAgentSession(adapters []AdapterTarget, sess *Session) (Ada
 			requested = sess.ModelDetails.GetDisplayModelId()
 		}
 	}
-	return ResolveAdapterForModel(adapters, requested)
+	target, ok := ResolveAdapterForModel(adapters, requested)
+	if ok && sess != nil && sess.RequestedModel != nil {
+		for _, param := range sess.RequestedModel.GetParameters() {
+			if param.GetId() == "reasoning" && param.GetValue() != "none" {
+				target.Opts.ReasoningEffort = param.GetValue()
+			}
+		}
+	}
+	return target, ok
 }
 
 func ResolveAdapterForBugBotRequest(adapters []AdapterTarget, req *aiserverv1.StreamBugBotRequest) (AdapterTarget, bool) {

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -189,6 +191,27 @@ func streamOpenAI(
 	}
 	if opts.MaxOutputTokens > 0 {
 		req.MaxTokens = opts.MaxOutputTokens
+	}
+	if os.Getenv("DEBUG") == "1" {
+		sys, usr, ast, tol := 0, 0, 0, 0
+		for _, m := range messages {
+			switch m.Role {
+			case "system":
+				sys++
+			case "user":
+				usr++
+			case "assistant":
+				ast++
+			case "tool":
+				tol++
+			}
+		}
+		tier := req.ServiceTier
+		if tier == "" {
+			tier = "auto"
+		}
+		log.Printf("[OPENAI REQ] Model: %s | ReasoningEffort: %s | ServiceTier: %s | MaxTokens: %d | Tools: %d | Messages: %d (sys:%d, usr:%d, ast:%d, tol:%d)",
+			req.Model, req.ReasoningEffort, tier, req.MaxTokens, len(req.Tools), len(messages), sys, usr, ast, tol)
 	}
 	body, err := json.Marshal(req)
 	if err != nil {

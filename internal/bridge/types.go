@@ -20,7 +20,7 @@ type ModelAdapterConfig struct {
 	APIKey          string `json:"apiKey"`
 	ModelID         string `json:"modelID"`
 	ContextWindow   string `json:"contextWindow,omitempty"`
-	ReasoningEffort string `json:"reasoningEffort,omitempty"`
+	SupportedThinkingLevels []string `json:"supportedThinkingLevels,omitempty"` // "none", "minimal", "low", "medium", "high", "xhigh"
 	ServiceTier     string `json:"serviceTier,omitempty"`
 	MaxOutputTokens string `json:"maxOutputTokens,omitempty"`
 	ThinkingBudget  string `json:"thinkingBudget,omitempty"`
