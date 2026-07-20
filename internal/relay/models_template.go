@@ -144,6 +144,18 @@ func buildAvailableModel(hexID, display string, supportedThinkingLevels []string
 	return out
 }
 
+func thinkingLevelDisplayName(lvl string) string {
+	if lvl == "" {
+		return ""
+	}
+	if lvl == "xhigh" {
+		return "Extra High"
+	} else if lvl == "none" {
+		return "None"
+	}
+	return strings.ToUpper(lvl[:1]) + lvl[1:]
+}
+
 func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLevels []string) []byte {
 	// Tag 29: parameter_definitions (repeated ModelParameterDefinition)
 	paramDef := make([]byte, 0, 128)
@@ -155,13 +167,7 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 	for _, lvl := range supportedThinkingLevels {
 		valDef := make([]byte, 0, 32)
 		valDef = appendString(valDef, 1, lvl)
-		displayName := strings.ToUpper(lvl[:1]) + lvl[1:]
-		if lvl == "xhigh" {
-			displayName = "Extra High"
-		} else if lvl == "none" {
-			displayName = "None"
-		}
-		valDef = appendString(valDef, 2, displayName)
+		valDef = appendString(valDef, 2, thinkingLevelDisplayName(lvl))
 
 		enumDef = protowire.AppendTag(enumDef, protowire.Number(1), protowire.BytesType)
 		enumDef = protowire.AppendVarint(enumDef, uint64(len(valDef)))
@@ -183,6 +189,22 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 	out = protowire.AppendVarint(out, uint64(len(paramDef)))
 	out = append(out, paramDef...)
 
+	bestIdx := 0
+	if len(supportedThinkingLevels) > 0 {
+		order := map[string]int{"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5}
+		bestRank := 99
+		for i, lvl := range supportedThinkingLevels {
+			r, ok := order[lvl]
+			if !ok {
+				r = 99
+			}
+			if r < bestRank {
+				bestRank = r
+				bestIdx = i
+			}
+		}
+	}
+
 	// Tag 30: variants (repeated ModelVariantConfig)
 	for i, lvl := range supportedThinkingLevels {
 		variant := make([]byte, 0, 64)
@@ -197,11 +219,9 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 		variant = append(variant, paramVal...)
 
 		// 2: display_name
-		variantDisplayName := strings.ToUpper(lvl[:1]) + lvl[1:]
-		if lvl == "xhigh" {
-			variantDisplayName = "Extra High"
-		} else if lvl == "none" {
-			variantDisplayName = "None"
+		variantDisplayName := display
+		if lvl != "none" {
+			variantDisplayName = display + " (" + thinkingLevelDisplayName(lvl) + ")"
 		}
 		variant = appendString(variant, 2, variantDisplayName)
 
@@ -212,7 +232,7 @@ func appendThinkingConfig(out []byte, hexID, display string, supportedThinkingLe
 		variant = appendBool(variant, 4, false)
 
 		// 5: is_default_non_max_config
-		variant = appendBool(variant, 5, i == 0)
+		variant = appendBool(variant, 5, i == bestIdx)
 
 		out = protowire.AppendTag(out, protowire.Number(30), protowire.BytesType)
 		out = protowire.AppendVarint(out, uint64(len(variant)))

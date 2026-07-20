@@ -402,7 +402,7 @@ function openEditor(i: number) {
       apiKey: "",
       modelID: "",
       contextWindow: "",
-      supportedThinkingLevels: ["none", "minimal", "low", "medium", "high", "xhigh"],
+      supportedThinkingLevels: providerTab.value === "openai" ? ["none", "minimal", "low", "medium", "high", "xhigh"] : [],
       serviceTier: "",
       maxOutputTokens: "",
       thinkingBudget: "",
@@ -414,7 +414,7 @@ function openEditor(i: number) {
     editorProvider.value = src.type === "anthropic" ? "anthropic" : "openai";
     editorModel.value = JSON.parse(JSON.stringify(src));
     if (editorModel.value && !editorModel.value.supportedThinkingLevels) {
-      editorModel.value.supportedThinkingLevels = ["none", "minimal", "low", "medium", "high", "xhigh"];
+      editorModel.value.supportedThinkingLevels = editorProvider.value === "openai" ? ["none", "minimal", "low", "medium", "high", "xhigh"] : [];
     }
   }
   showApiKey.value = false;
@@ -427,6 +427,12 @@ function cancelEditor() {
 
 async function saveEditor(runTest = false) {
   if (!editorModel.value) return;
+  
+  if (editorModel.value.supportedThinkingLevels) {
+    const order: Record<string, number> = { none: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5 };
+    editorModel.value.supportedThinkingLevels.sort((a, b) => (order[a] ?? 99) - (order[b] ?? 99));
+  }
+
   editorModel.value.type = editorProvider.value;
   if (editorIndex.value === -1) {
     cfg.value.modelAdapters.push(editorModel.value);

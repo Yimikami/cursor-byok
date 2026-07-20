@@ -148,6 +148,9 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 			return req, &http.Response{
 				StatusCode: http.StatusNoContent,
 				Status:     "204 No Content",
+				Proto:      req.Proto,
+				ProtoMajor: req.ProtoMajor,
+				ProtoMinor: req.ProtoMinor,
 				Header: http.Header{
 					"Access-Control-Allow-Origin":  {"*"},
 					"Access-Control-Allow-Methods": {"GET,POST,PUT,PATCH,DELETE,OPTIONS"},
