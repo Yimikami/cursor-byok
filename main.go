@@ -45,6 +45,8 @@ func main() {
 		log.Fatalf("failed to init proxy service: %v", err)
 	}
 
+	var window *application.WebviewWindow
+
 	app := application.New(application.Options{
 		Name:        "cursor-byok",
 		Description: "cursor-byok - Local MITM proxy & BYOK gateway for Cursor IDE",
@@ -57,9 +59,18 @@ func main() {
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
+		SingleInstance: &application.SingleInstanceOptions{
+			UniqueID: "cursor-byok",
+			OnSecondInstanceLaunch: func(_ application.SecondInstanceData) {
+				if window != nil {
+					window.Show()
+					window.Focus()
+				}
+			},
+		},
 	})
 
-	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
+	window = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:         "cursor-byok",
 		Width:         1000,
 		Height:        540,
