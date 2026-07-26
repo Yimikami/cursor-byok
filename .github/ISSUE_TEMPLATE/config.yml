@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup help & troubleshooting
+    url: https://github.com/Yimikami/cursor-byok#first-time-setup
+    about: Please read the README's setup and "Safety & caveats" sections before opening an issue.
