@@ -25,6 +25,37 @@ func gzipReader(b []byte) (io.ReadCloser, error) {
 	return gzip.NewReader(bytes.NewReader(b))
 }
 
+// cursorMITMHosts is the set of hostnames whose TLS we actually intercept.
+// Cursor's agent traffic (api2.cursor.sh) has to be decrypted so we can
+// translate its RPCs to the user's BYOK provider, and its auth endpoints
+// have to be decrypted so we can 404 them and keep the injected Pro session
+// trusted. Nothing else needs interception.
+var cursorMITMHosts = map[string]struct{}{
+	"api2.cursor.sh":                {},
+	"authentication.cursor.sh":      {},
+	"prod.authentication.cursor.sh": {},
+}
+
+// shouldMITMHost reports whether a CONNECT target (host or host:port) is one
+// of Cursor's own hosts we must intercept. Every other host is tunnelled
+// straight through untouched.
+//
+// This matters because enabling the system proxy points *all* of the
+// machine's HTTPS at this listener, not just Cursor's. MITMing every host
+// would present our self-signed CA for sites we have no reason to touch and
+// break any app that pins certificates or doesn't trust our CA — e.g. Discord
+// fails to connect while the proxy is running (issue #4). Restricting MITM to
+// Cursor's hosts lets unrelated traffic reach its real upstream and validate
+// the genuine server certificate as usual.
+func shouldMITMHost(host string) bool {
+	hostname := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostname = h
+	}
+	_, ok := cursorMITMHosts[strings.ToLower(hostname)]
+	return ok
+}
+
 type Server struct {
 	addr string
 	srv  *http.Server
@@ -57,7 +88,16 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 
 	p := goproxy.NewProxyHttpServer()
 	p.Verbose = os.Getenv("DEBUG") == "1"
-	p.OnRequest().HandleConnect(goproxy.AlwaysMitm)
+	// Only decrypt Cursor's own hosts; tunnel everything else straight to its
+	// real upstream. The system proxy routes the whole machine's HTTPS here,
+	// so intercepting every host would break unrelated apps that pin certs or
+	// don't trust our CA (issue #4). See shouldMITMHost.
+	p.OnRequest().HandleConnectFunc(func(host string, _ *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+		if shouldMITMHost(host) {
+			return goproxy.MitmConnect, host
+		}
+		return goproxy.OkConnect, host
+	})
 
 	// Mimic the working app's "everything secondary is 404" strategy. Cursor
 	// pings dozens of auxiliary RPCs (auth profile, plan info, plugins,

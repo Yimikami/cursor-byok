@@ -7,7 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
--
+### Fixed
+
+- Restrict HTTPS interception to Cursor's own hosts and tunnel all other traffic straight through. With the system proxy enabled, the whole machine's HTTPS was previously routed through the MITM listener and intercepted with the local CA, breaking apps that pin certificates or don't trust the CA (e.g. Discord failing to log in) while the proxy was running (#4).
 
 ## [1.0.1] - 2026-04-22
 
