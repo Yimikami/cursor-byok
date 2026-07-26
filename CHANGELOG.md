@@ -7,9 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+-
+
+## [1.0.2] - 2026-07-26
+
 ### Fixed
 
 - Restrict HTTPS interception to Cursor's own hosts and tunnel all other traffic straight through. With the system proxy enabled, the whole machine's HTTPS was previously routed through the MITM listener and intercepted with the local CA, breaking apps that pin certificates or don't trust the CA (e.g. Discord failing to log in) while the proxy was running (#4).
+- Release workflow now checks out the exact tag on manual (`workflow_dispatch`) re-runs, so re-published artifacts match the tag instead of the branch the workflow was launched from.
+
+### Added
+
+- Bug-report and feature-request issue templates under `.github/ISSUE_TEMPLATE/`.
 
 ## [1.0.1] - 2026-04-22
 
