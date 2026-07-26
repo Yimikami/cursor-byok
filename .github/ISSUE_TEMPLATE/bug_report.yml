@@ -1,0 +1,96 @@
+name: Bug report
+description: Report something that isn't working in cursor-byok
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. Please fill in as much as you can — a report that
+        just says "does not work" can't be acted on. cursor-byok is MITM software
+        that mutates Cursor's local settings, so the details below really matter.
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you start
+      options:
+        - label: I searched existing issues and this hasn't been reported yet.
+          required: true
+        - label: I'm on the latest release (or built from the latest `main`).
+          required: true
+        - label: I read the "First-time setup" and "Safety & caveats" sections of the README.
+          required: true
+  - type: input
+    id: version
+    attributes:
+      label: cursor-byok version
+      description: The release tag, or the commit SHA if you built from source.
+      placeholder: "v1.0.1 (or commit abc1234)"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux
+    validations:
+      required: true
+  - type: input
+    id: os_detail
+    attributes:
+      label: OS version / distro
+      placeholder: "Windows 10 LTSC 2019 · macOS 14.5 · Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: cursor_version
+    attributes:
+      label: Cursor IDE version
+      description: Cursor → Help → About.
+      placeholder: "0.42.3"
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider type
+      options:
+        - OpenAI-compatible
+        - Anthropic
+        - Other / local (vLLM, llama.cpp, Ollama, ...)
+    validations:
+      required: true
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what did you expect to happen instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start the service
+        2. Install the CA
+        3. Open Cursor and ...
+        4. See error
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: |
+        Relevant output helps a lot. Start the service with the `DEBUG=1`
+        environment variable for verbose proxy logs.
+
+        ⚠️ **Redact your API keys** and any other secrets before pasting.
+      render: shell
+    validations:
+      required: false
