@@ -25,15 +25,44 @@ func gzipReader(b []byte) (io.ReadCloser, error) {
 	return gzip.NewReader(bytes.NewReader(b))
 }
 
-// cursorMITMHosts is the set of hostnames whose TLS we actually intercept.
-// Cursor's agent traffic (api2.cursor.sh) has to be decrypted so we can
-// translate its RPCs to the user's BYOK provider, and its auth endpoints
-// have to be decrypted so we can 404 them and keep the injected Pro session
-// trusted. Nothing else needs interception.
-var cursorMITMHosts = map[string]struct{}{
-	"api2.cursor.sh":                {},
-	"authentication.cursor.sh":      {},
-	"prod.authentication.cursor.sh": {},
+// Cursor's own hosts, split by the role each plays once we intercept it.
+// api2.cursor.sh carries the agent RPCs we translate to the user's BYOK
+// provider (plus the synthetic model-list responses); the authentication
+// hosts are 404'd so Cursor keeps trusting the injected Pro session. These
+// are the only hosts whose TLS we decrypt — everything else is tunnelled
+// straight through.
+var (
+	cursorAPI2Hosts = map[string]struct{}{
+		"api2.cursor.sh": {},
+	}
+	cursorAuthHosts = map[string]struct{}{
+		"authentication.cursor.sh":      {},
+		"prod.authentication.cursor.sh": {},
+	}
+)
+
+// normalizeHost lowercases a host and strips any port. Cursor connects with a
+// lowercase hostname on :443, but normalizing keeps the CONNECT-time MITM
+// decision (shouldMITMHost) and the request-time routing decision (the
+// DoFunc handler) consistent — otherwise a differently-cased or non-443
+// Cursor host could be MITM'd at one layer yet fall through to the upstream
+// at the other.
+func normalizeHost(host string) string {
+	hostname := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		hostname = h
+	}
+	return strings.ToLower(hostname)
+}
+
+func isCursorAPI2Host(host string) bool {
+	_, ok := cursorAPI2Hosts[normalizeHost(host)]
+	return ok
+}
+
+func isCursorAuthHost(host string) bool {
+	_, ok := cursorAuthHosts[normalizeHost(host)]
+	return ok
 }
 
 // shouldMITMHost reports whether a CONNECT target (host or host:port) is one
@@ -48,12 +77,7 @@ var cursorMITMHosts = map[string]struct{}{
 // Cursor's hosts lets unrelated traffic reach its real upstream and validate
 // the genuine server certificate as usual.
 func shouldMITMHost(host string) bool {
-	hostname := host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		hostname = h
-	}
-	_, ok := cursorMITMHosts[strings.ToLower(hostname)]
-	return ok
+	return isCursorAPI2Host(host) || isCursorAuthHost(host)
 }
 
 type Server struct {
@@ -111,24 +135,14 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 	// runs (agent in/out streams). Everything else on api2/auth hosts gets
 	// a 404 — matching the working app's captured behaviour byte-for-byte.
 	allowedAPI2Paths := map[string]struct{}{
-		"/aiserver.v1.BidiService/BidiAppend": {}, // agent input stream
-		"/agent.v1.AgentService/RunSSE":       {}, // agent output SSE
-		"/aiserver.v1.AiService/WriteGitCommitMessage": {},
-		"/aiserver.v1.AiService/StreamBugBotAgenticSSE": {},
+		"/aiserver.v1.BidiService/BidiAppend":                                       {}, // agent input stream
+		"/agent.v1.AgentService/RunSSE":                                             {}, // agent output SSE
+		"/aiserver.v1.AiService/WriteGitCommitMessage":                              {},
+		"/aiserver.v1.AiService/StreamBugBotAgenticSSE":                             {},
 		"/aiserver.v1.BackgroundComposerService/AddAsyncFollowupBackgroundComposer": {},
-		"/aiserver.v1.BackgroundComposerService/GetBackgroundComposerStatus": {},
-		"/aiserver.v1.BackgroundComposerService/AttachBackgroundComposer": {},
-		"/aiserver.v1.BackgroundComposerService/StreamInteractionUpdatesSSE": {},
-	}
-	authHosts := map[string]struct{}{
-		"prod.authentication.cursor.sh":     {},
-		"prod.authentication.cursor.sh:443": {},
-		"authentication.cursor.sh":          {},
-		"authentication.cursor.sh:443":      {},
-	}
-	api2Hosts := map[string]struct{}{
-		"api2.cursor.sh":     {},
-		"api2.cursor.sh:443": {},
+		"/aiserver.v1.BackgroundComposerService/GetBackgroundComposerStatus":        {},
+		"/aiserver.v1.BackgroundComposerService/AttachBackgroundComposer":           {},
+		"/aiserver.v1.BackgroundComposerService/StreamInteractionUpdatesSSE":        {},
 	}
 	// Synthetic raw-protobuf responses cloned from the working app captures.
 	// Each entry is a hand-rolled body the gateway can produce on demand
@@ -201,10 +215,9 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 				Request: req,
 			}
 		}
-		host := req.URL.Host
 		path := req.URL.Path
-		_, isAuthHost := authHosts[host]
-		_, isAPI2Host := api2Hosts[host]
+		isAuthHost := isCursorAuthHost(req.URL.Host)
+		isAPI2Host := isCursorAPI2Host(req.URL.Host)
 		if isAPI2Host {
 			if _, ok := syntheticAPI2Paths[path]; ok && gw != nil {
 				if body := gw.SyntheticPath(path); body != nil {
