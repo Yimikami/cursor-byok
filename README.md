@@ -1,3 +1,5 @@
+
+
 # cursor-byok
 
 [![CI](https://github.com/Yimikami/cursor-byok/actions/workflows/ci.yml/badge.svg)](https://github.com/Yimikami/cursor-byok/actions/workflows/ci.yml)
@@ -65,6 +67,9 @@ Only these four Cursor paths are handled:
 Everything else on `api2.cursor.sh` and Cursor's auth hosts is 404'd on
 purpose — any auxiliary RPC returning real upstream data can flip Cursor's chat
 picker into "BYOK not allowed" and hide the injected models.
+
+Non-Cursor hosts are not intercepted; their HTTPS traffic is tunneled straight
+through.
 
 ---
 
