@@ -338,15 +338,18 @@ func HandleAgentWebSocket(ctx context.Context, conn *websocket.Conn, resolve Ada
 						}
 						started = true
 						PutSession(sess)
-						go func() { defer close(done); runAgentSession(runCtx, sess.RequestID, sess, writer, resolve) }()
+						go func() {
+							defer close(done)
+							runAgentSessionWithScope(runCtx, sess.RequestID, sess, writer, resolve, socketToolScope(sess.RequestID))
+						}()
 					}
 				} else if msg.GetRunRequest() != nil {
 					writer.end("invalid_argument", "run already started")
 					return
 				}
-				routeExecClientResult(sess.RequestID, msg)
+				routeExecClientResult(socketToolScope(sess.RequestID), msg)
 				if ir := msg.GetInteractionResponse(); ir != nil {
-					deliverInteractionResponse(sess.RequestID, ir)
+					deliverInteractionResponse(socketToolScope(sess.RequestID), ir)
 				}
 			case 4:
 				halfClosed = true

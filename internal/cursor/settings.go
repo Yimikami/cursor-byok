@@ -99,6 +99,12 @@ func GetStatus() Status {
 // platform. Returns "" when the directory doesn't exist (e.g. Cursor not
 // installed for this user).
 func settingsPath() string {
+	if root, set := cursorDataDirOverride(); set {
+		if root == "" {
+			return ""
+		}
+		return filepath.Join(root, "User", "settings.json")
+	}
 	switch runtime.GOOS {
 	case "windows":
 		root := os.Getenv("APPDATA")
@@ -120,7 +126,7 @@ func backupPath() string {
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(dir, "cursor-settings-backup.json")
+	return filepath.Join(dir, ProfileBackupName("cursor-settings-backup.json"))
 }
 
 func configDir() (string, error) {

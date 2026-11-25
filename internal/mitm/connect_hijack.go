@@ -55,6 +55,14 @@ func (w *http1TunnelWriter) Flush() {
 	}
 }
 
+func (w *http1TunnelWriter) Write(data []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(data)
+	// Connect protobuf streams (including Tab) are not text/event-stream.
+	// Send their initial frames before provider completion.
+	w.Flush()
+	return n, err
+}
+
 func (w *http1TunnelWriter) closeHijacked() {
 	// goproxy stops its WebSocket bridge after either copy direction ends.
 	// Closing the client here also unblocks the other direction and releases

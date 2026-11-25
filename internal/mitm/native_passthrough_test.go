@@ -2,6 +2,7 @@ package mitm
 
 import (
 	"bytes"
+	"context"
 	"crypto/x509"
 	"encoding/base64"
 	"io"
@@ -29,7 +30,7 @@ func nativeTestProxy(t *testing.T) *goproxy.ProxyHttpServer {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New("127.0.0.1:0", ca, nil, nil, func(string) string { return "" })
+	s, err := newWithAuthorizer("127.0.0.1:0", ca, nil, nil, func(string) string { return "" }, func(context.Context, http.Header) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}

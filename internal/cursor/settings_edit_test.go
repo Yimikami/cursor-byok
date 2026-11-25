@@ -163,3 +163,50 @@ func TestSettingsEditRejectsCorruptOriginalValue(t *testing.T) {
 		t.Fatal("corrupt backup injected an unrelated property")
 	}
 }
+
+func TestSettingsApplyAcceptsCompactDocumentWithoutTrailingComma(t *testing.T) {
+	dir := t.TempDir()
+	path, backup := filepath.Join(dir, "settings.json"), filepath.Join(dir, "backup.json")
+	if err := os.WriteFile(path, []byte(`{"editor.fontSize":14}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyCursorTweaksAt(path, backup, "127.0.0.1:18080"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := decodeSettings(data)
+	if err != nil || settings["editor.fontSize"] != float64(14) || settings["http.proxy"] != "http://127.0.0.1:18080" {
+		t.Fatalf("invalid compact settings edit: %s, %v", data, err)
+	}
+	if err := revertCursorTweaksAt(path, backup); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSettingsRawRestoreDoesNotDuplicateMovedValueComments(t *testing.T) {
+	for _, original := range []string{
+		`{"http.proxy": {"old": /* keep */ true}, "other": 1}`,
+		"{\"http.proxy\": {\"old\": true // keep\n}, \"other\": 1}",
+	} {
+		doc, err := parseSettingsDocument([]byte(original))
+		if err != nil {
+			t.Fatal(err)
+		}
+		changes := map[string]settingsChange{"http.proxy": {present: true, value: "temporary"}}
+		raw, err := doc.rawValues(changes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		active, err := editSettings([]byte(original), changes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restored, err := editSettings(active, map[string]settingsChange{"http.proxy": {present: true, raw: raw["http.proxy"]}})
+		if err != nil || string(restored) != original {
+			t.Fatalf("value comment round trip changed document: %s, %v", restored, err)
+		}
+	}
+}

@@ -73,9 +73,8 @@ The client sends hello first and expects a v1 hello response. RunStart must
 receive RunAccepted before server messages. Client messages may already be
 pipelined behind RunStart. HalfClose stops further client messages without
 canceling the response. CancelRun cancels upstream work and returns RunEnd.
-For InferenceService, HalfClose waits for every accepted invocation to emit
-its response and InvocationEnd before the final RunEnd. A disconnected socket
-or explicit CancelRun still cancels those invocations immediately.
+InferenceService drains accepted invocations after HalfClose, including each
+InvocationEnd, before RunEnd. Full disconnect and CancelRun cancel them.
 
 The implementation intentionally serves one run per socket. The inspected
 client only reuses a socket when RunEnd includes the trailer
@@ -138,10 +137,10 @@ to the protocol by the stream endpoint before decoding. Both older hex data
 concurrent POSTs by `append_seqno`, deduplicates retries, bounds pending input,
 and discards queued input when a stream closes. This preserves the separate
 AgentService and BugBot SSE decoders. Poll transport remains unsupported.
-Detached AgentService and BugBot streams can reattach with the same request
-ID and protocol, preserving the consumed append sequence watermark and the
-session store's original conversation. Concurrent attachments and protocol
-changes remain rejected; inference resumption is not advertised or enabled.
+Detached AgentService and BugBot streams may reattach with the same request ID
+and protocol while preserving consumed input sequence and conversation identity.
+Concurrent owners and protocol changes are rejected. This transport reopening
+does not advertise full inference session resumption or output replay.
 
 The shared BidiAppend endpoint also carries native Cursor requests. A
 per-proxy registry separates local streams from the native chat, speech,

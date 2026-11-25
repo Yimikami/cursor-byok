@@ -71,19 +71,20 @@ func TestLegacyStreamErrorIsOneCompleteConnectFrame(t *testing.T) {
 func TestCanceledToolAndInteractionWaitsReleasePendingEntries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	tool := registerToolWait("cancelled-owner", "cancelled-test-tool")
-	registerExecIDAlias("cancelled-owner", "cancelled-test-exec", 123456, "cancelled-test-tool")
+	scope := socketToolScope(t.Name())
+	tool := registerToolWait(scope, "cancelled-test-tool")
+	registerExecIDAlias(scope, "cancelled-test-exec", 123456, "cancelled-test-tool")
 	result := waitForToolResultContext(ctx, tool, time.Hour)
 	if result.Error != context.Canceled.Error() {
 		t.Fatalf("result = %+v", result)
 	}
-	interaction := registerInteractionWait("cancelled-owner", 123456)
+	interaction := registerInteractionWait(scope, 123456)
 	if r := waitForInteractionResponse(ctx, interaction, time.Hour); r != nil {
 		t.Fatal("cancel returned a verdict")
 	}
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
-	if pending[toolWaitKey{"cancelled-owner", "cancelled-test-tool"}] != nil || execIDAlias[toolWaitKey{"cancelled-owner", "cancelled-test-exec"}] != "" || seqAlias[sequenceWaitKey{"cancelled-owner", 123456}] != "" || pendingInteraction[sequenceWaitKey{"cancelled-owner", 123456}] != nil {
+	if pending[toolWaitKey{scope, "cancelled-test-tool"}] != nil || execIDAlias[toolWaitKey{scope, "cancelled-test-exec"}].id != "" || seqAlias[sequenceWaitKey{scope, 123456}].id != "" || pendingInteraction[sequenceWaitKey{scope, 123456}] != nil {
 		t.Fatal("cancel retained wait state")
 	}
 }

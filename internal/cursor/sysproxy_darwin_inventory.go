@@ -84,46 +84,22 @@ func (i darwinNetworkInventory) withNativeServiceNames(names map[string]string) 
 	return i
 }
 
-func (i darwinNetworkInventory) idForName(name string) (string, error) {
-	found := ""
-	for id, currentName := range i.services {
-		if !i.current[id] || currentName != name {
-			continue
-		}
-		if found != "" {
-			return "", fmt.Errorf("multiple macOS network services are named %q; recovery entries retained", name)
-		}
-		found = id
+func (i darwinNetworkInventory) identities() map[string]networkServiceIdentity {
+	if i.services == nil {
+		return nil
 	}
-	if found == "" {
-		return "", fmt.Errorf("network service %q has no identity in the current location", name)
+	identities := make(map[string]networkServiceIdentity, len(i.services))
+	for id, name := range i.services {
+		identities[id] = networkServiceIdentity{ID: id, Name: name, Current: i.current[id]}
 	}
-	return found, nil
+	return identities
 }
 
-func (i darwinNetworkInventory) restoreName(sp darwinServiceProxy) (name string, deleted bool, err error) {
-	id := sp.ServiceID
-	if id == "" {
-		// Old backups contain only names. An absent name could be a rename,
-		// so do not claim deletion and abandon a potentially active proxy.
-		id, err = i.idForName(sp.Service)
-		if err != nil {
-			return "", false, fmt.Errorf("cannot safely resolve legacy backup for %q (it may have been renamed): %w", sp.Service, err)
-		}
-	}
-	name, exists := i.services[id]
-	if !exists {
-		return "", true, nil
-	}
-	if !i.current[id] {
-		return "", false, fmt.Errorf("network service %q (%s) is in another location; switch back before retrying recovery", sp.Service, id)
-	}
-	if name == "" {
-		return "", false, fmt.Errorf("network service %s has no name; recovery entry retained", id)
-	}
-	resolved, err := i.idForName(name)
-	if err != nil || resolved != id {
-		return "", false, fmt.Errorf("network service name %q is ambiguous; recovery entry retained", name)
-	}
-	return name, false, nil
+func (i darwinNetworkInventory) idForName(name string) (string, error) {
+	service, err := currentNetworkService(name, i.identities())
+	return service.ID, err
+}
+
+func (i darwinNetworkInventory) restoreName(sp darwinServiceProxy) (string, bool, error) {
+	return resolveNetworkService(sp.ServiceID, sp.Service, i.identities())
 }

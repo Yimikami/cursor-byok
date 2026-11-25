@@ -723,6 +723,7 @@ enum CustomSubagentPermissionMode {
 message DebugModeConfig {
   string log_path = 1;
   string server_endpoint = 2;
+  string session_id = 3;
 }
 
 // Copied from: local:agent.v1.DeleteArgs (var: $He, class: KC)

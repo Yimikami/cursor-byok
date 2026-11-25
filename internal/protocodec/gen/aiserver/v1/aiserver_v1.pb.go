@@ -24476,6 +24476,7 @@ type BidiAppendRequest struct {
 	Data          string                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
 	RequestId     *BidiRequestId         `protobuf:"bytes,2,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	AppendSeqno   int64                  `protobuf:"varint,3,opt,name=append_seqno,json=appendSeqno,proto3" json:"append_seqno,omitempty"`
+	DataBinary    []byte                 `protobuf:"bytes,4,opt,name=data_binary,json=dataBinary,proto3" json:"data_binary,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -24529,6 +24530,13 @@ func (x *BidiAppendRequest) GetAppendSeqno() int64 {
 		return x.AppendSeqno
 	}
 	return 0
+}
+
+func (x *BidiAppendRequest) GetDataBinary() []byte {
+	if x != nil {
+		return x.DataBinary
+	}
+	return nil
 }
 
 // Copied from: local:aiserver.v1.BidiAppendResponse (var: lNt, class: Cq)
@@ -227095,12 +227103,14 @@ const file_aiserver_v1_proto_rawDesc = "" +
 	"\x05modelB\r\n" +
 	"\v_request_idB\f\n" +
 	"\n" +
-	"_tool_name\"\x85\x01\n" +
+	"_tool_name\"\xa6\x01\n" +
 	"\x11BidiAppendRequest\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\tR\x04data\x129\n" +
 	"\n" +
 	"request_id\x18\x02 \x01(\v2\x1a.aiserver.v1.BidiRequestIdR\trequestId\x12!\n" +
-	"\fappend_seqno\x18\x03 \x01(\x03R\vappendSeqno\"\x14\n" +
+	"\fappend_seqno\x18\x03 \x01(\x03R\vappendSeqno\x12\x1f\n" +
+	"\vdata_binary\x18\x04 \x01(\fR\n" +
+	"dataBinary\"\x14\n" +
 	"\x12BidiAppendResponse\"\x88\x01\n" +
 	"\x0fBidiPollRequest\x129\n" +
 	"\n" +

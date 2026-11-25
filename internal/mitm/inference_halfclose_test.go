@@ -35,8 +35,8 @@ func TestInferenceHalfCloseDrainsOrCancelsExplicitly(t *testing.T) {
 			defer cancel()
 			c := wsConnect(t, ctx, client, "cursor-run-inference-v1")
 			defer c.CloseNow()
-			inferenceStart(t, ctx, c)
-			if err := c.Write(ctx, websocket.MessageBinary, wsClientMessage("run-1", 1, inferenceInvoke("half-close", "finish this response"))); err != nil {
+			inferenceWebSocketStart(t, ctx, c)
+			if err := c.Write(ctx, websocket.MessageBinary, wsClientMessage("run-1", 1, inferenceWebSocketInvoke("half-close", "finish this response"))); err != nil {
 				t.Fatal(err)
 			}
 			select {

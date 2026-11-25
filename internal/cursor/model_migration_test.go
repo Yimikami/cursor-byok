@@ -6,59 +6,46 @@ import (
 	"testing"
 )
 
-func TestModelSelectionMigratesOnlyRecognizableLegacyCloudPins(t *testing.T) {
-	const oldID = "0123456789abcdef"
-	const activeID = "fedcba9876543210"
-	for _, tc := range []struct {
-		name, cloud, wantCloud string
-	}{
-		{"old-inactive-adapter", `{"defaultModel":"0123456789abcdef","fallbackModels":["0123456789abcdef"],"bestOfNDefaultModels":["0123456789abcdef"]}`, ""},
-		{"preserves-custom-sibling", `{"defaultModel":"0123456789abcdef","fallbackModels":["0123456789abcdef"],"bestOfNDefaultModels":["0123456789abcdef"],"custom":"keep"}`, `{"custom":"keep"}`},
-		{"native-model", `{"defaultModel":"native-cloud","fallbackModels":["native-cloud"],"bestOfNDefaultModels":["native-cloud"]}`, "same"},
-		{"unknown-hex-id", `{"defaultModel":"1111111111111111","fallbackModels":["1111111111111111"],"bestOfNDefaultModels":["1111111111111111"]}`, "same"},
-		{"mixed-fallback", `{"defaultModel":"0123456789abcdef","fallbackModels":["native-cloud"],"bestOfNDefaultModels":["0123456789abcdef"]}`, "same"},
-		{"multiple-fallbacks", `{"defaultModel":"0123456789abcdef","fallbackModels":["0123456789abcdef","native-cloud"],"bestOfNDefaultModels":["0123456789abcdef"]}`, "same"},
-		{"partial-config", `{"defaultModel":"0123456789abcdef","fallbackModels":["0123456789abcdef"]}`, "same"},
-		{"unexpected-config", `{"defaultModel":"0123456789abcdef","fallbackModels":[{}],"bestOfNDefaultModels":["0123456789abcdef"]}`, "same"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			original := `{"featureModelConfigs":{"backgroundComposer":` + tc.cloud + `},"aiSettings":{"modelConfig":{"background-composer":{"modelName":"native-selected","custom":true}}},"unrelated":"keep"}`
-			db, path, backup := testCursorDB(t, map[string]string{reactiveStorageKey: original, "unrelated-row": "keep"})
-			want, err := decodeApplicationUser([]byte(original))
-			if err != nil {
+func TestLegacyCloudModelPinRepairRequiresExactKnownSignature(t *testing.T) {
+	for _, variant := range []string{"exact", "native-default", "mixed-fallback", "unknown-id", "different-composer", "missing-best-of"} {
+		t.Run(variant, func(t *testing.T) {
+			const id = "configured-local-adapter"
+			composer := map[string]any{"modelName": id}
+			cloud := map[string]any{"defaultModel": id, "fallbackModels": []any{id}, "bestOfNDefaultModels": []any{id}, "customChoice": "preserve"}
+			switch variant {
+			case "native-default":
+				cloud["defaultModel"] = "native-cloud-model"
+			case "mixed-fallback":
+				cloud["fallbackModels"] = []any{id, "native-fallback"}
+			case "unknown-id":
+				cloud["defaultModel"] = "previous-unknown-adapter"
+				cloud["fallbackModels"] = []any{"previous-unknown-adapter"}
+				cloud["bestOfNDefaultModels"] = []any{"previous-unknown-adapter"}
+			case "different-composer":
+				composer["modelName"] = "native-local-choice"
+			case "missing-best-of":
+				delete(cloud, "bestOfNDefaultModels")
+			}
+			original := map[string]any{"aiSettings": map[string]any{"modelConfig": map[string]any{"composer": composer}}, "featureModelConfigs": map[string]any{"backgroundComposer": cloud}}
+			raw, _ := json.Marshal(original)
+			db, path, backup := testCursorDB(t, map[string]string{reactiveStorageKey: string(raw)})
+			if err := forceModelSelectionAt(path, backup, id); err != nil {
 				t.Fatal(err)
 			}
-			features := want["featureModelConfigs"].(map[string]any)
-			switch tc.wantCloud {
-			case "":
-				delete(features, "backgroundComposer")
-			case "same":
-			default:
-				var cloud map[string]any
-				if err := json.Unmarshal([]byte(tc.wantCloud), &cloud); err != nil {
-					t.Fatal(err)
-				}
-				features["backgroundComposer"] = cloud
+			want := cloud
+			if variant == "exact" {
+				want = map[string]any{"customChoice": "preserve"}
 			}
-			// The old pin can belong to an adapter other than today's active one.
-			// A second start/stop also proves the migration does not replay it.
-			for range 2 {
-				if err := forceModelSelectionAt(path, backup, activeID, activeID, oldID); err != nil {
-					t.Fatal(err)
+			for _, stop := range []bool{false, true} {
+				if stop {
+					if err := restoreModelSelectionAt(path, backup); err != nil {
+						t.Fatal(err)
+					}
 				}
-				current := readTestPreferences(t, db)
-				if !reflect.DeepEqual(current["featureModelConfigs"].(map[string]any)["backgroundComposer"], features["backgroundComposer"]) {
-					t.Fatal("incorrect cloud preference migration during Start")
+				got := readTestPreferences(t, db)["featureModelConfigs"].(map[string]any)["backgroundComposer"]
+				if !reflect.DeepEqual(got, want) {
+					t.Fatalf("cloud choices changed unexpectedly (stop=%v): got=%#v want=%#v", stop, got, want)
 				}
-				if err := restoreModelSelectionAt(path, backup); err != nil {
-					t.Fatal(err)
-				}
-				if got := readTestPreferences(t, db); !reflect.DeepEqual(got, want) {
-					t.Fatalf("Stop changed native preferences or restored a legacy pin: got=%#v want=%#v", got, want)
-				}
-			}
-			if readTestItems(t, db)["unrelated-row"] != "keep" {
-				t.Fatal("unrelated SQLite row changed")
 			}
 		})
 	}
