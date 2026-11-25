@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-26
+
 ### Fixed
 
+- Publish configuration changes as complete private snapshots and serialize readers/writers; prevent a delayed adapter probe from overwriting newer settings.
 - Restore the native model selector for configured BYOK adapters on macOS and Windows using Cursor's own-key mode and named-model view, with exact preference restoration and protection for disabled saved native keys.
 - Respect native schema wrappers, tuple/pattern constraints and repaired Anthropic tool history when normalizing provider arguments; fix real CreatePlan todo-array failures.
 - Require the exact macOS CA SSL trust record before reporting readiness, and remove only trust domains containing that certificate.
@@ -39,6 +42,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Regression coverage for certificate identity, proxy failure recovery, JSONC settings, and TLS WebSocket agent streaming. CI now runs the Go test suite on Windows, macOS, and Linux.
+
+### Validation and limits
+
+- Real macOS Cursor 3.32.4 checks cover the native model picker, same-chat Letum → Claude Sonnet 4.6 → Letum switching, file/terminal tools, MCP, skills, Ask/Plan/Debug/Multitask, commit generation, Cmd-K and Tab. See [the native test report](docs/macos-native-20261126.md).
+- Windows shares the picker fix and automated checks; a final Windows desktop run of this selector is not claimed. Hosted XSearch and image generation failed upstream in the tested account; cloud/indexing/voice/video features are not certified.
+- Quit Cursor before starting or stopping the proxy so its preference cache cannot overwrite restored settings. A saved, disabled native OpenAI key prevents automatic own-key mode activation.
 
 ## [1.0.2] - 2026-07-26
 

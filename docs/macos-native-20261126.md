@@ -228,6 +228,15 @@ repeat-test cleanup is recorded separately below. Private credential/snapshot fi
 
 ## Captured follow-up findings
 
+CodeRabbit's retained PR #16 configuration-write finding was reproduced:
+concurrent Save calls and routing reads could observe truncated JSON and lose
+the adapter list. Configuration writes now publish a synced, private temporary
+file via replacement; a shared lock covers all readers, saves and read/modify/
+write operations. A delayed connectivity probe updates only its unchanged
+adapter's test metadata, preserving settings edited while the request ran.
+Regression tests reproduced both failures before the fix and pass afterward,
+including concurrent routing reads and failed-publication cleanup.
+
 The repeated native GenerateImage invocation on the correctly trusted session
 received HTTP 404, `application/json`, Connect error code `not_found` from the
 Cursor upstream. An observer attached only to this RPC preserved response bytes

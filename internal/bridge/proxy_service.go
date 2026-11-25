@@ -153,7 +153,9 @@ func (s *ProxyService) GetCloseAction() string {
 // and "tray" are the only meaningful values; anything else is normalised
 // to "" (which makes the dialog reappear on the next close — a safe reset).
 func (s *ProxyService) SetCloseAction(action string) error {
-	cfg, err := readConfig(s.cfgDir)
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := readConfigLocked(s.cfgDir)
 	if err != nil {
 		return err
 	}
@@ -163,11 +165,7 @@ func (s *ProxyService) SetCloseAction(action string) error {
 	default:
 		cfg.CloseAction = ""
 	}
-	b, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(s.cfgDir, "config.json"), b, 0o600)
+	return writeConfigLocked(s.cfgDir, cfg)
 }
 
 // RequestQuit triggers the registered quit callback. Called from the
@@ -351,6 +349,8 @@ func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
 }
 
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
+	configMu.Lock()
+	defer configMu.Unlock()
 	cfg.ActiveModelID = strings.TrimSpace(cfg.ActiveModelID)
 	if cfg.ActiveModelID != "" {
 		found := false
@@ -364,11 +364,7 @@ func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 			cfg.ActiveModelID = ""
 		}
 	}
-	b, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(s.cfgDir, "config.json"), b, 0o600)
+	return writeConfigLocked(s.cfgDir, cfg)
 }
 
 func (s *ProxyService) ExportCAPEM() string {
@@ -443,9 +439,7 @@ func (s *ProxyService) TestAdapter(index int) (ModelAdapterConfig, error) {
 	}
 
 	a.LastTestedAt = time.Now().Unix()
-	cfg.ModelAdapters[index] = a
-	_ = s.SaveUserConfig(cfg)
-	return a, nil
+	return a, s.saveAdapterTestResult(index, cfg.ModelAdapters[index], a)
 }
 
 func runAdapterPing(a ModelAdapterConfig) string {
@@ -524,6 +518,12 @@ func (s *ProxyService) ServiceShutdown() error {
 }
 
 func readConfig(dir string) (UserConfig, error) {
+	configMu.RLock()
+	defer configMu.RUnlock()
+	return readConfigLocked(dir)
+}
+
+func readConfigLocked(dir string) (UserConfig, error) {
 	cfg := UserConfig{BaseURL: defaultUpstream}
 	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
