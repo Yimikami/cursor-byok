@@ -266,13 +266,20 @@ async function revertTweaks() {
   }
 }
 
-async function toggleService() {
+async function changeService(start: boolean) {
   busy.value = true;
   try {
-    state.value = state.value.running
-      ? ((await ProxyService.StopProxy()) as ProxyState)
-      : ((await ProxyService.StartProxy()) as ProxyState);
+    state.value = start
+      ? ((await ProxyService.StartProxy()) as ProxyState)
+      : ((await ProxyService.StopProxy()) as ProxyState);
   } catch (e: any) {
+    // A failed transition can leave the listener running for recovery.
+    // Wails rejects the call on error, so fetch the resulting state explicitly.
+    try {
+      state.value = (await ProxyService.GetState()) as ProxyState;
+    } catch {
+      // Keep the original transition error visible if status is unavailable.
+    }
     alert(e?.message ?? String(e));
   } finally {
     busy.value = false;
@@ -619,7 +626,7 @@ onBeforeUnmount(() => {
         <button
           :class="['btn', state.running ? 'btn-ghost' : 'btn-primary']"
           :disabled="busy"
-          @click="toggleService"
+          @click="changeService(!state.running)"
         >
           {{ state.running ? "Stop" : "Start service" }}
         </button>
@@ -849,6 +856,9 @@ onBeforeUnmount(() => {
 
       <div v-if="state.lastError" class="error-banner">
         {{ state.lastError }}
+        <button class="btn btn-ghost btn-sm" :disabled="busy" @click="changeService(false)">
+          Stop and restore settings
+        </button>
       </div>
 
       <div class="footer">

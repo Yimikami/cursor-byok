@@ -3,6 +3,7 @@ module cursor-byok
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/elazarl/goproxy v1.8.3
 	github.com/wailsapp/wails/v3 v3.0.0-alpha.74
 	golang.org/x/sys v0.42.0
@@ -17,7 +18,6 @@ require (
 	github.com/adrg/xdg v0.5.3 // indirect
 	github.com/bep/debounce v1.2.1 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
-	github.com/coder/websocket v1.8.14 // indirect
 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect

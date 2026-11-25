@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -47,6 +46,12 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.w.Write(p)
+}
+
+func (l *lockedWriter) WriteFrame(body []byte, endStream bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return writeFrame(l.w, body, endStream)
 }
 
 func (l *lockedWriter) Flush() {
@@ -177,6 +182,12 @@ func HandleRunSSE(
 		writeEndStreamError(w, "no session/user text for request_id="+requestID)
 		return
 	}
+	runAgentSession(ctx, requestID, sess, rawWriter, resolve)
+}
+
+// runAgentSession is shared by the legacy HTTP transport and WebSocket v1.
+func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWriter io.Writer, resolve AdapterResolver) {
+	w := &lockedWriter{w: rawWriter}
 	// Periodic keepalive — Cursor closes the SSE pipe after ~60-90s of
 	// write-side silence, and long OpenAI generations (especially with
 	// reasoning models that buffer before emitting) can easily cross that
@@ -374,7 +385,7 @@ func HandleRunSSE(
 				if interaction != nil && pc.Name == "SwitchMode" {
 					waitCh := registerInteractionWait(interaction.GetId())
 					_ = writeInteractionQuery(w, interaction)
-					verdict := waitForInteractionResponse(waitCh, 45*time.Second)
+					verdict := waitForInteractionResponse(ctx, waitCh, 45*time.Second)
 					switch {
 					case verdict == nil:
 						localResult = `{"result":"timeout","note":"User did not respond to the mode switch dialog within 45 seconds. The IDE may not require approval — continue the task."}`
@@ -466,7 +477,7 @@ func HandleRunSSE(
 					waitWindow = time.Duration(bu+2000) * time.Millisecond
 				}
 			}
-			env := waitForToolResult(waitCh, waitWindow)
+			env := waitForToolResultContext(ctx, waitCh, waitWindow)
 
 			// Attach the tool result back onto the ToolCall proto so
 			// Cursor's pill renders stdout/stderr directly under the
@@ -599,15 +610,15 @@ func persistFailure(sess *Session, requestID string, startedAt time.Time, messag
 		return
 	}
 	summary := map[string]any{
-		"request_id":    requestID,
-		"started_at":    startedAt.UTC().Format(time.RFC3339Nano),
-		"finished_at":   time.Now().UTC().Format(time.RFC3339Nano),
-		"duration_ms":   time.Since(startedAt).Milliseconds(),
-		"model":         model,
+		"request_id":      requestID,
+		"started_at":      startedAt.UTC().Format(time.RFC3339Nano),
+		"finished_at":     time.Now().UTC().Format(time.RFC3339Nano),
+		"duration_ms":     time.Since(startedAt).Milliseconds(),
+		"model":           model,
 		"requested_model": requestedModelForSession(sess),
-		"provider":      providerFromURL(baseURL),
-		"message_count": len(messages),
-		"error":         streamErr.Error(),
+		"provider":        providerFromURL(baseURL),
+		"message_count":   len(messages),
+		"error":           streamErr.Error(),
 	}
 	sb, _ := json.MarshalIndent(summary, "", "  ")
 	RecordTurn(sess.ConversationID, requestID, sess.UserText, "", modeString(sess.Mode), &turnArtifacts{
@@ -657,10 +668,7 @@ func requestedModelForSession(sess *Session) string {
 // abnormal terminator and shows it instead of looping in retry forever.
 func writeEndStreamError(w io.Writer, msg string) {
 	body := []byte(`{"error":{"code":"internal","message":` + jsonString(msg) + `}}`)
-	hdr := [5]byte{flagEndStream, 0, 0, 0, 0}
-	binary.BigEndian.PutUint32(hdr[1:5], uint32(len(body)))
-	_, _ = w.Write(hdr[:])
-	_, _ = w.Write(body)
+	_ = writeFrame(w, body, true)
 	flushIfPossible(w)
 }
 

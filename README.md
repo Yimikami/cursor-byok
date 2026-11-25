@@ -9,7 +9,7 @@
 A local desktop app that turns the Cursor IDE into a **Bring-Your-Own-Key** client.
 cursor-byok runs an on-device HTTPS MITM proxy, intercepts Cursor's traffic to
 `api2.cursor.sh`, forges a logged-in "Pro" session, and translates Cursor's
-proprietary Connect-RPC agent protocol into **OpenAI Chat Completions** against
+proprietary Connect-RPC / WebSocket agent protocol into **OpenAI Chat Completions** against
 any OpenAI-compatible or Anthropic provider you configure.
 
 > **Status:** research / personal-use project. Expect rough edges. Running it
@@ -45,31 +45,39 @@ Cursor IDE
     │  (system proxy → 127.0.0.1:18080)
     ▼
 cursor-byok MITM
-    │  intercepts only the four Cursor RPC paths the agent needs,
+    │  handles Cursor's agent and model endpoints locally,
     │  404s everything else so Cursor's BYOK picker stays happy
     ▼
 Agent loop  ─────►  OpenAI Chat Completions / Anthropic Messages
     │              (your provider, your API key)
     ▼
-Cursor receives Connect-SSE frames translated back into its native
-AgentService / BidiService protocol.
+Cursor receives native agent messages over WebSocket v1 or legacy
+AgentService / BidiService Connect-SSE.
 ```
 
-Only these four Cursor paths are handled:
+Core agent and model endpoints:
 
 | Path                                              | Purpose                                 |
 | ------------------------------------------------- | --------------------------------------- |
+| `/agent/v1/run`                                 | bidirectional WebSocket v1 agent stream |
 | `/aiserver.v1.BidiService/BidiAppend`             | user input / tool results / UI verdicts |
 | `/agent.v1.AgentService/RunSSE`                   | streamed agent output                   |
 | `/aiserver.v1.AiService/AvailableModels`          | synthetic (your BYOK adapters)          |
 | `/aiserver.v1.AiService/GetDefaultModelNudgeData` | synthetic default-model hint            |
 
-Everything else on `api2.cursor.sh` and Cursor's auth hosts is 404'd on
+The proxy also handles commit-message, BugBot, and background-composer RPCs.
+Other paths on `api2.cursor.sh` and Cursor's auth hosts are 404'd on
 purpose — any auxiliary RPC returning real upstream data can flip Cursor's chat
 picker into "BYOK not allowed" and hide the injected models.
 
 Non-Cursor hosts are not intercepted; their HTTPS traffic is tunneled straight
 through.
+
+WebSocket v1 was checked against the packaged Cursor 3.32.4 client. The
+transport, evidence, and verification limits are documented in
+[`docs/agent-websocket.md`](docs/agent-websocket.md). This addresses the
+missing `/agent/v1/run` route reported in [#12](https://github.com/Yimikami/cursor-byok/issues/12);
+it does not establish compatibility with every Cursor release or feature.
 
 ---
 
@@ -159,12 +167,35 @@ dashboards.
      `openai/gpt-oss-20b`)
    - Optional: reasoning effort, service tier, max output tokens, thinking budget.
 6. Back on **Overview**, click **Start service**. This:
+   - Checks the active CA's trust (Windows/macOS) and requires a configured model
+   - Starts the local listener and prepares Cursor before changing the system proxy
    - Enables the system proxy on Windows and macOS
    - Leaves Linux system proxy untouched, but writes Cursor's own proxy settings so Cursor itself routes through `127.0.0.1:18080`
    - Writes `http.proxy` / `http.proxyStrictSSL: false` and related Cursor settings (originals backed up)
    - Injects the synthetic Pro session into Cursor's `state.vscdb` (originals backed up to `cursor-auth-backup.json`)
 7. Open Cursor. Your adapter appears in the model picker. Chat away.
 8. Click **Stop service** when done — proxy state, Cursor settings, and auth are restored to what they were before.
+
+If setup fails, the service restores changes already made and reports the failing
+step. If restoration fails, it keeps the listener available and retains the
+backups; resolve the reported error and retry **Stop service**. On the next app
+launch, it attempts to recover the previous session's backups.
+
+### Connection troubleshooting
+
+- **CA says not trusted:** click **Install CA** in the same Windows account that
+  runs Cursor, then fully restart Cursor. A certificate with the same name from
+  another installation does not trust this installation's CA.
+- **Internet stops after an older version crashes:** reopen cursor-byok to recover
+  its saved proxy settings. If it cannot open, inspect your OS proxy settings. If
+  the manual proxy is specifically `127.0.0.1:18080` and cursor-byok is stopped,
+  turn off that stale manual proxy. Preserve any unrelated VPN/corporate proxy
+  configuration and the `sysproxy-backup.json` recovery file.
+- **Cursor settings error:** JSONC comments and trailing commas are supported;
+  malformed settings or unreadable backups still stop setup before the system
+  proxy is enabled.
+- **Adapter test succeeds, but chat returns 404 on `/agent/v1/run`:** use a build
+  containing WebSocket v1 support. Older releases only handle the legacy SSE path.
 
 ---
 
@@ -180,6 +211,8 @@ Under the user config root for your platform:
 | ------------------------------------- | ------------------------------------------------- |
 | `config.json`                         | adapters + user settings (contains your API keys) |
 | `ca/`                                 | self-signed root CA used for MITM                 |
+| `sysproxy-backup.json`                | original system proxy; kept until restoration succeeds |
+| `cursor-settings-backup.json`         | original Cursor proxy/certificate settings      |
 | `cursor-auth-backup.json`             | your original Cursor auth, restored on Stop       |
 | `history/<conv-id>/conversation.json` | ordered turn log                                  |
 | `history/<conv-id>/turns/NNNNNN/`     | per-turn request / SSE / summary artifacts        |
@@ -247,7 +280,7 @@ configured adapter.
   - **macOS:** current-user login keychain
   - **Linux:** user NSS DB (`~/.pki/nssdb`) when `certutil` is available; otherwise you must import the CA manually into the trust stores you use
 - **Linux has no single vendor-neutral trust store.** Automatic NSS import covers Chromium/Electron-style consumers that use NSS, but not every distro, browser, or CLI stack. Manual trust may still be required.
-- **Cursor's settings.json and SQLite store are modified.** Originals are backed up and restored on Stop, but if the app is killed mid-run you may need to revert manually.
+- **Cursor's settings.json and SQLite store are modified.** Proxy/settings and auth backups are restored on Stop or recovered on the next app launch. Forced termination can interrupt that process; keep the recovery files. Model picker preferences are pinned separately and are not restored by the auth backup.
 - **API keys are stored in plain text** in cursor-byok's `config.json` with user-only permissions where supported. If that's not acceptable for your threat model, don't use this.
 - **Cursor's protocol is proprietary.** cursor-byok tracks behavioural fidelity with specific Cursor versions; a Cursor update can break it at any time.
 - **This project is not affiliated with or endorsed by Anysphere / Cursor.** All trademarks belong to their respective owners.

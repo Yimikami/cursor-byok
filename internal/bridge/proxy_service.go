@@ -19,7 +19,6 @@ import (
 	"cursor-byok/internal/agent"
 	"cursor-byok/internal/certs"
 	"cursor-byok/internal/cursor"
-	"cursor-byok/internal/mitm"
 	"cursor-byok/internal/relay"
 )
 
@@ -31,7 +30,9 @@ const (
 type ProxyService struct {
 	mu              sync.RWMutex
 	state           ProxyState
-	proxy           *mitm.Server
+	proxy           proxyServer
+	lifecycle       *proxyLifecycle
+	recoveryPending bool
 	ca              *certs.CA
 	gateway         *relay.Gateway
 	cfgDir          string
@@ -62,15 +63,15 @@ func adapterListFromConfig(c UserConfig) []relay.AdapterInfo {
 			continue
 		}
 		out = append(out, relay.AdapterInfo{
-			DisplayName:     a.DisplayName,
-			Type:            a.Type,
-			ModelID:         a.ModelID,
-			BaseURL:         a.BaseURL,
-			APIKey:          a.APIKey,
+			DisplayName:             a.DisplayName,
+			Type:                    a.Type,
+			ModelID:                 a.ModelID,
+			BaseURL:                 a.BaseURL,
+			APIKey:                  a.APIKey,
 			SupportedThinkingLevels: a.SupportedThinkingLevels,
-			ServiceTier:     a.ServiceTier,
-			MaxOutputTokens: parseIntSafe(a.MaxOutputTokens),
-			ThinkingBudget:  parseIntSafe(a.ThinkingBudget),
+			ServiceTier:             a.ServiceTier,
+			MaxOutputTokens:         parseIntSafe(a.MaxOutputTokens),
+			ThinkingBudget:          parseIntSafe(a.ThinkingBudget),
 		})
 	}
 	return prioritizeActiveAdapter(out, strings.TrimSpace(c.ActiveModelID))
@@ -195,14 +196,6 @@ func (s *ProxyService) RequestHide() {
 	}
 }
 
-func (s *ProxyService) fireState() {
-	cb := s.onStateChange
-	running := s.state.Running
-	if cb != nil {
-		cb(running)
-	}
-}
-
 func detectCAInstallMode() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -233,17 +226,26 @@ func buildCAWarning() string {
 	}
 }
 
+// NewProxyService must be called after acquiring the application's
+// single-instance lock because it recovers persisted settings from a crash.
 func NewProxyService() (*ProxyService, error) {
 	dir, err := cfgDir()
 	if err != nil {
 		return nil, err
 	}
+	return newProxyService(dir, RecoverInterruptedSession)
+}
+
+func newProxyService(dir string, recoverSession func(*ProxyService) error) (*ProxyService, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
+	// Do not let a damaged CA pair strand the system proxy from a prior run.
+	recovery := &ProxyService{cfgDir: dir}
+	recoveryErr := recoverSession(recovery)
 	ca, err := certs.LoadOrCreate(filepath.Join(dir, "ca"))
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, recoveryErr)
 	}
 	gw := relay.NewGateway()
 	// Persist chat turns under %APPDATA%/cursor-byok/history so conversations
@@ -256,17 +258,19 @@ func NewProxyService() (*ProxyService, error) {
 		baseURL = defaultUpstream
 	}
 	svc := &ProxyService{
-		cfgDir:  dir,
-		ca:      ca,
-		gateway: gw,
+		cfgDir:          dir,
+		ca:              ca,
+		gateway:         gw,
+		recoveryPending: recovery.recoveryPending,
 		state: ProxyState{
 			ListenAddr:    defaultListenAddr,
 			BaseURL:       baseURL,
 			CAFingerprint: ca.Fingerprint(),
 			CAPath:        filepath.Join(ca.Dir(), "ca.crt"),
-			CAInstalled:   certs.IsInstalledUserRoot(),
+			CAInstalled:   certs.IsInstalledUserRoot(filepath.Join(ca.Dir(), "ca.crt")),
 			CAInstallMode: detectCAInstallMode(),
 			CAWarning:     buildCAWarning(),
+			LastError:     recovery.state.LastError,
 		},
 	}
 	svc.gatewayAdapters = func() []relay.AdapterInfo { return adapterListFor(svc.cfgDir) }
@@ -284,135 +288,44 @@ func (s *ProxyService) GetState() ProxyState {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	st := s.state
-	st.CAInstalled = certs.IsInstalledUserRoot()
+	st.CAInstalled = certs.IsInstalledUserRoot(filepath.Join(s.ca.Dir(), "ca.crt"))
 	st.CAInstallMode = detectCAInstallMode()
 	st.CAWarning = buildCAWarning()
 	return st
 }
 
 func (s *ProxyService) InstallCA() (ProxyState, error) {
-	if err := certs.InstallUserRoot(filepath.Join(s.ca.Dir(), "ca.crt")); err != nil {
-		s.mu.Lock()
-		s.state.LastError = err.Error()
-		s.mu.Unlock()
-		return s.GetState(), err
-	}
-	s.mu.Lock()
-	s.state.CAInstalled = true
-	s.state.LastError = ""
-	s.mu.Unlock()
-	return s.GetState(), nil
-}
-
-func (s *ProxyService) UninstallCA() (ProxyState, error) {
-	if err := certs.UninstallUserRoot(); err != nil {
-		s.mu.Lock()
-		s.state.LastError = err.Error()
-		s.mu.Unlock()
-		return s.GetState(), err
-	}
-	s.mu.Lock()
-	s.state.CAInstalled = false
-	s.state.LastError = ""
-	s.mu.Unlock()
-	return s.GetState(), nil
-}
-
-func (s *ProxyService) StartProxy() (ProxyState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.state.Running {
-		return s.state, nil
-	}
-	_, _ = readConfig(s.cfgDir)
-	s.state.ListenAddr = defaultListenAddr
-	listen := defaultListenAddr
-		resolver := func() []agent.AdapterTarget {
-			ads := s.gatewayAdapters()
-			out := make([]agent.AdapterTarget, 0, len(ads))
-			for _, a := range ads {
-				out = append(out, agent.AdapterTargetFromRelay(a))
-			}
-			return out
-		}
-		selectedModel := func(purpose string) string { return selectedModelFor(s.cfgDir, purpose) }
-		srv, err := mitm.New(listen, s.ca, s.gateway, resolver, selectedModel)
-	if err != nil {
+	certPath := filepath.Join(s.ca.Dir(), "ca.crt")
+	if err := certs.InstallUserRoot(certPath); err != nil {
 		s.state.LastError = err.Error()
 		return s.state, err
 	}
-	if err := srv.Start(); err != nil {
+	s.state.CAInstalled = certs.IsInstalledUserRoot(certPath)
+	if !s.state.CAInstalled {
+		err := errors.New("CA installation could not be verified; the current local CA is not trusted")
 		s.state.LastError = err.Error()
 		return s.state, err
 	}
-	if err := cursor.EnableSystemProxy(s.state.ListenAddr); err != nil {
-		_ = srv.Stop(context.Background())
-		s.state.LastError = "proxy started but couldn't update system settings: " + err.Error()
-		return s.state, err
-	}
-	// Non-fatal start errors go into warnings so the caller still gets a
-	// "Running" state for the parts that did succeed — but the UI can
-	// surface the partial failures instead of reporting a clean start.
-	var warnings []string
-	if err := cursor.ApplyCursorTweaks(s.state.ListenAddr); err != nil {
-		warnings = append(warnings, "Cursor settings.json tweak failed: "+err.Error())
-	}
-	// Inject the synthetic Pro session into Cursor's SQLite. Cursor reads
-	// these auth keys at startup and renders "logged-in Pro user" UI when
-	// they look valid; combined with the auth-endpoint MITM mocks this
-	// unlocks BYOK on the chat picker without a real cursor.com account.
-	// The previous values are saved to backupPath so Stop can restore the
-	// user's real Cursor account — without this the user gets stuck with
-	// our fake JWT after disabling the proxy and Cursor refuses to log in
-	// against the real api2.cursor.sh.
-	if err := cursor.InjectFakeProUser(s.authBackupPath()); err != nil {
-		warnings = append(warnings, "Cursor SQLite Pro inject failed: "+err.Error())
-	}
-	if adapters := s.gatewayAdapters(); len(adapters) > 0 {
-		// Pin every Cursor feature (composer / cmd-K / agent / etc.) at the
-		// first BYOK adapter. Without this Cursor's picker reads a stale
-		// selection from SQLite and renders nothing because the cached id
-		// no longer matches our AvailableModels response.
-		if err := cursor.ForceModelSelection(adapters[0].StableID()); err != nil {
-			warnings = append(warnings, "Cursor SQLite model pin failed: "+err.Error())
-		}
-	}
-	s.proxy = srv
-	s.state.Running = true
-	s.state.StartedAt = time.Now().Unix()
-	if len(warnings) > 0 {
-		// Preserve every non-fatal failure so the UI can surface them —
-		// clearing LastError here would have hidden e.g. a failed
-		// settings.json tweak behind a "clean start" banner.
-		s.state.LastError = "Partial start: " + strings.Join(warnings, "; ")
-	} else {
-		s.state.LastError = ""
-	}
-	s.fireState()
+	s.state.LastError = ""
 	return s.state, nil
 }
 
-func (s *ProxyService) StopProxy() (ProxyState, error) {
+func (s *ProxyService) UninstallCA() (ProxyState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.state.Running {
-		return s.state, nil
+	if s.state.Running {
+		err := errors.New("stop the service before uninstalling its CA")
+		s.state.LastError = err.Error()
+		return s.state, err
 	}
-	_ = cursor.DisableSystemProxy()
-	_ = cursor.RevertCursorTweaks()
-	// Put the user's original Cursor auth back so Cursor can log in against
-	// the real api2.cursor.sh once it's no longer routed through us. Failure
-	// here is non-fatal; we'd rather report stopped than block the UI.
-	if err := cursor.RestoreFakeProUser(s.authBackupPath()); err != nil {
-		s.state.LastError = "Cursor SQLite auth restore failed: " + err.Error()
+	if err := certs.UninstallUserRoot(filepath.Join(s.ca.Dir(), "ca.crt")); err != nil {
+		s.state.LastError = err.Error()
+		return s.state, err
 	}
-	if s.proxy != nil {
-		_ = s.proxy.Stop(context.Background())
-		s.proxy = nil
-	}
-	s.state.Running = false
-	s.state.StartedAt = 0
-	s.fireState()
+	s.state.CAInstalled = false
+	s.state.LastError = ""
 	return s.state, nil
 }
 
@@ -635,8 +548,15 @@ func (s *ProxyService) GetUsageStats() UsageStats {
 	return out
 }
 
-func (s *ProxyService) Shutdown() {
-	_, _ = s.StopProxy()
+func (s *ProxyService) Shutdown() error {
+	_, err := s.StopProxy()
+	return err
+}
+
+// Wails invokes this lifecycle hook for native application quit/shutdown,
+// including paths that do not pass through our tray or close-dialog callback.
+func (s *ProxyService) ServiceShutdown() error {
+	return s.Shutdown()
 }
 
 func readConfig(dir string) (UserConfig, error) {
@@ -648,7 +568,9 @@ func readConfig(dir string) (UserConfig, error) {
 		}
 		return cfg, err
 	}
-	_ = json.Unmarshal(b, &cfg)
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse config.json: %w", err)
+	}
 	if cfg.BaseURL == "" {
 		cfg.BaseURL = defaultUpstream
 	}

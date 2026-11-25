@@ -22,7 +22,20 @@ const (
 // are serialized into a single buffer and written atomically so a
 // background keepalive goroutine can share the writer without interleaving
 // bytes between the header and payload.
+// frameWriter lets another transport carry raw protobuf messages without
+// first encoding and decompressing the legacy Connect envelope.
+type frameWriter interface {
+	WriteFrame(body []byte, endStream bool) error
+}
+
 func writeFrame(w io.Writer, body []byte, endStream bool) error {
+	if fw, ok := w.(frameWriter); ok {
+		return fw.WriteFrame(body, endStream)
+	}
+	return writeConnectFrame(w, body, endStream)
+}
+
+func writeConnectFrame(w io.Writer, body []byte, endStream bool) error {
 	var compressed bytes.Buffer
 	zw := gzip.NewWriter(&compressed)
 	if _, err := zw.Write(body); err != nil {

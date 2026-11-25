@@ -104,15 +104,19 @@ func parseProxyGet(out string) (enabled bool, server string, port string) {
 	return
 }
 
-func readServiceProxy(service string) darwinServiceProxy {
+func readServiceProxy(service string) (darwinServiceProxy, error) {
 	sp := darwinServiceProxy{Service: service}
-	if out, err := exec.Command("networksetup", "-getwebproxy", service).Output(); err == nil {
-		sp.HTTPEnabled, sp.HTTPServer, sp.HTTPPort = parseProxyGet(string(out))
+	out, err := exec.Command("networksetup", "-getwebproxy", service).Output()
+	if err != nil {
+		return sp, fmt.Errorf("read HTTP proxy for %s: %w", service, err)
 	}
-	if out, err := exec.Command("networksetup", "-getsecurewebproxy", service).Output(); err == nil {
-		sp.HTTPSEnabled, sp.HTTPSServer, sp.HTTPSPort = parseProxyGet(string(out))
+	sp.HTTPEnabled, sp.HTTPServer, sp.HTTPPort = parseProxyGet(string(out))
+	out, err = exec.Command("networksetup", "-getsecurewebproxy", service).Output()
+	if err != nil {
+		return sp, fmt.Errorf("read HTTPS proxy for %s: %w", service, err)
 	}
-	return sp
+	sp.HTTPSEnabled, sp.HTTPSServer, sp.HTTPSPort = parseProxyGet(string(out))
+	return sp, nil
 }
 
 func saveSysProxyBackup(bk darwinSysProxyBackup) error {
@@ -127,7 +131,7 @@ func saveSysProxyBackup(bk darwinSysProxyBackup) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	return writeSystemProxyBackup(p, b)
 }
 
 func loadSysProxyBackup() (darwinSysProxyBackup, error) {
@@ -155,8 +159,8 @@ func EnableSystemProxy(addr string) error {
 		return fmt.Errorf("invalid listen addr %q: %w", addr, err)
 	}
 	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return fmt.Errorf("invalid port %q: %w", portStr, err)
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("invalid port %q", portStr)
 	}
 	services, err := listNetworkServices()
 	if err != nil {
@@ -166,98 +170,75 @@ func EnableSystemProxy(addr string) error {
 		return errors.New("no active macOS network services found")
 	}
 
-	// Snapshot only when no backup exists — idempotent + crash-safe.
-	if _, statErr := os.Stat(sysProxyBackupPath()); os.IsNotExist(statErr) {
-		bk := darwinSysProxyBackup{}
-		for _, svc := range services {
-			bk.Services = append(bk.Services, readServiceProxy(svc))
-		}
-		if saveErr := saveSysProxyBackup(bk); saveErr != nil {
-			return fmt.Errorf("snapshot system proxy: %w", saveErr)
-		}
+	// Validate the existing recovery record before touching any service.
+	bk, err := loadSysProxyBackup()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read system proxy backup: %w", err)
 	}
-
-	var firstErr error
+	known := make(map[string]bool)
+	for _, sp := range bk.Services {
+		known[sp.Service] = true
+	}
 	for _, svc := range services {
-		if err := runNetworksetup("-setwebproxy", svc, host, strconv.Itoa(port)); err != nil && firstErr == nil {
-			firstErr = err
-		}
-		if err := runNetworksetup("-setsecurewebproxy", svc, host, strconv.Itoa(port)); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
-}
-
-// DisableSystemProxy restores every service's HTTP + HTTPS proxy state from
-// the sidecar backup. Services absent from the backup (e.g. added after we
-// snapshotted) get their HTTP/HTTPS proxies turned off rather than left
-// pointing at our stopped listener. The sidecar is removed on success so
-// the NEXT Enable re-snapshots a fresh state.
-func DisableSystemProxy() error {
-	services, listErr := listNetworkServices()
-	if listErr != nil {
-		return listErr
-	}
-
-	bk, loadErr := loadSysProxyBackup()
-	if loadErr != nil {
-		// No backup → best-effort: just turn both proxies off on every
-		// active service so traffic isn't silently routed at the dead
-		// MITM listener.
-		var firstErr error
-		for _, svc := range services {
-			if err := runNetworksetup("-setwebproxystate", svc, "off"); err != nil && firstErr == nil {
-				firstErr = err
-			}
-			if err := runNetworksetup("-setsecurewebproxystate", svc, "off"); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		return firstErr
-	}
-
-	byName := map[string]darwinServiceProxy{}
-	for _, s := range bk.Services {
-		byName[s.Service] = s
-	}
-
-	var firstErr error
-	restore := func(svc string, sp darwinServiceProxy) {
-		// HTTP
-		if sp.HTTPEnabled && sp.HTTPServer != "" && sp.HTTPPort != "" {
-			if err := runNetworksetup("-setwebproxy", svc, sp.HTTPServer, sp.HTTPPort); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			if err := runNetworksetup("-setwebproxystate", svc, "off"); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-		// HTTPS
-		if sp.HTTPSEnabled && sp.HTTPSServer != "" && sp.HTTPSPort != "" {
-			if err := runNetworksetup("-setsecurewebproxy", svc, sp.HTTPSServer, sp.HTTPSPort); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		} else {
-			if err := runNetworksetup("-setsecurewebproxystate", svc, "off"); err != nil && firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-
-	for _, svc := range services {
-		if sp, ok := byName[svc]; ok {
-			restore(svc, sp)
+		if known[svc] {
 			continue
 		}
-		// Service we didn't snapshot (added mid-session) — disable proxies
-		// on it so we don't leave it pointed at us.
-		restore(svc, darwinServiceProxy{Service: svc})
+		sp, err := readServiceProxy(svc)
+		if err != nil {
+			return err
+		}
+		bk.Services = append(bk.Services, sp)
 	}
+	if err := saveSysProxyBackup(bk); err != nil {
+		return fmt.Errorf("snapshot system proxy: %w", err)
+	}
+	for _, svc := range services {
+		if err := runNetworksetup("-setwebproxy", svc, host, strconv.Itoa(port)); err != nil {
+			return errors.Join(err, DisableSystemProxy())
+		}
+		if err := runNetworksetup("-setsecurewebproxy", svc, host, strconv.Itoa(port)); err != nil {
+			return errors.Join(err, DisableSystemProxy())
+		}
+	}
+	return nil
+}
 
-	_ = os.Remove(sysProxyBackupPath())
-	return firstErr
+// DisableSystemProxy restores only services recorded in the backup. Missing
+// backups mean we own no settings; failures preserve the record for retry.
+func DisableSystemProxy() error {
+	bk, err := loadSysProxyBackup()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read system proxy backup: %w", err)
+	}
+	var restoreErrors []error
+	restore := func(svc, setCommand, stateCommand, server, port string, enabled bool) {
+		if server != "" && port != "" && port != "0" {
+			if err := runNetworksetup(setCommand, svc, server, port); err != nil {
+				restoreErrors = append(restoreErrors, err)
+				// Do not reenable a destination that could still be our
+				// stopped listener when restoring the original server failed.
+				enabled = false
+			}
+		}
+		state := "off"
+		if enabled {
+			state = "on"
+		}
+		if err := runNetworksetup(stateCommand, svc, state); err != nil {
+			restoreErrors = append(restoreErrors, err)
+		}
+	}
+	for _, sp := range bk.Services {
+		restore(sp.Service, "-setwebproxy", "-setwebproxystate", sp.HTTPServer, sp.HTTPPort, sp.HTTPEnabled)
+		restore(sp.Service, "-setsecurewebproxy", "-setsecurewebproxystate", sp.HTTPSServer, sp.HTTPSPort, sp.HTTPSEnabled)
+	}
+	if err := errors.Join(restoreErrors...); err != nil {
+		return err
+	}
+	return os.Remove(sysProxyBackupPath())
 }
 
 // IsSystemProxyEnabled reports whether at least one active network service

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,11 +93,24 @@ func deliverInteractionResponse(resp *agentv1.InteractionResponse) {
 // waitForInteractionResponse blocks until Cursor's IDE delivers the user's
 // verdict on the InteractionQuery we emitted (approve / reject), or the
 // timeout elapses. Returns nil on timeout.
-func waitForInteractionResponse(ch <-chan *agentv1.InteractionResponse, timeout time.Duration) *agentv1.InteractionResponse {
+func waitForInteractionResponse(ctx context.Context, ch <-chan *agentv1.InteractionResponse, timeout time.Duration) *agentv1.InteractionResponse {
+	defer func() {
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		for id, waiting := range pendingInteraction {
+			if waiting == ch {
+				delete(pendingInteraction, id)
+			}
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
+	case <-ctx.Done():
+		return nil
 	case r := <-ch:
 		return r
-	case <-time.After(timeout):
+	case <-timer.C:
 		return nil
 	}
 }
@@ -680,11 +694,11 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 			Tool: &agentv1.ToolCall_ShellToolCall{
 				ShellToolCall: &agentv1.ShellToolCall{
 					Args: &agentv1.ShellArgs{
-						Command:                  a.Command,
-						WorkingDirectory:         a.WorkingDirectory,
-						Timeout:                  timeoutMs,
-						ToolCallId:               pc.ID,
-						SimpleCommands:           []string{a.Command},
+						Command:          a.Command,
+						WorkingDirectory: a.WorkingDirectory,
+						Timeout:          timeoutMs,
+						ToolCallId:       pc.ID,
+						SimpleCommands:   []string{a.Command},
 						ParsingResult: &agentv1.ShellCommandParsingResult{
 							ExecutableCommands: []*agentv1.ShellCommandParsingResult_ExecutableCommand{
 								{Name: a.Command, FullText: a.Command},
@@ -1360,10 +1374,39 @@ func attachDeleteResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 // timeout envelope after 2 minutes so a stuck IDE doesn't hang the server
 // goroutine forever.
 func waitForToolResult(ch chan *toolResultEnvelope, timeout time.Duration) *toolResultEnvelope {
+	return waitForToolResultContext(context.Background(), ch, timeout)
+}
+
+func waitForToolResultContext(ctx context.Context, ch chan *toolResultEnvelope, timeout time.Duration) *toolResultEnvelope {
+	defer func() {
+		pendingMu.Lock()
+		defer pendingMu.Unlock()
+		for id, waiting := range pending {
+			if waiting.ch != ch {
+				continue
+			}
+			delete(pending, id)
+			for exec, target := range execIDAlias {
+				if target == id {
+					delete(execIDAlias, exec)
+				}
+			}
+			for seq, target := range seqAlias {
+				if target == id {
+					delete(seqAlias, seq)
+					delete(shellAccum, seq)
+				}
+			}
+		}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
+	case <-ctx.Done():
+		return &toolResultEnvelope{Error: ctx.Err().Error()}
 	case env := <-ch:
 		return env
-	case <-time.After(timeout):
+	case <-timer.C:
 		return &toolResultEnvelope{Error: "tool execution timed out after " + timeout.String()}
 	}
 }

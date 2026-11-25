@@ -81,10 +81,11 @@ func shouldMITMHost(host string) bool {
 }
 
 type Server struct {
-	addr string
-	srv  *http.Server
-	ln   net.Listener
-	gw   *relay.Gateway
+	addr   string
+	srv    *http.Server
+	ln     net.Listener
+	gw     *relay.Gateway
+	cancel context.CancelFunc
 }
 
 // agentResolver lets the agent package fetch the user's first BYOK adapter
@@ -110,6 +111,7 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: tlsCfg}
 	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsCfg}
 
+	serverCtx, cancel := context.WithCancel(context.Background())
 	p := goproxy.NewProxyHttpServer()
 	p.Verbose = os.Getenv("DEBUG") == "1"
 	// Only decrypt Cursor's own hosts; tunnel everything else straight to its
@@ -219,6 +221,9 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 		isAuthHost := isCursorAuthHost(req.URL.Host)
 		isAPI2Host := isCursorAPI2Host(req.URL.Host)
 		if isAPI2Host {
+			if path == "/agent/v1/run" {
+				return req, handleAgentWebSocket(req, serverCtx, resolver)
+			}
 			if _, ok := syntheticAPI2Paths[path]; ok && gw != nil {
 				if body := gw.SyntheticPath(path); body != nil {
 					return req, mockProto(req, body)
@@ -271,9 +276,10 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 	}
 
 	return &Server{
-		addr: addr,
-		gw:   gw,
-		srv:  &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second},
+		addr:   addr,
+		cancel: cancel,
+		gw:     gw,
+		srv:    &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second},
 	}, nil
 }
 
@@ -525,6 +531,9 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Stop(ctx context.Context) error {
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if s.srv == nil {
 		return nil
 	}
