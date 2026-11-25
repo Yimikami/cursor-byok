@@ -70,12 +70,27 @@ func decodeInferenceAnthropicContent(native *inferencev1.InferenceCoreMessage, m
 		return nil, nil
 	}
 	var reasoning, text, tools []anthropicContentBlock
+	hasAnthropicReasoning := false
 	for _, part := range native.GetReasoningParts() {
+		if !part.GetIsRedacted() && part.GetSignature() == "" {
+			// Generic reasoning (for example OpenAI reasoning_content) is not
+			// an Anthropic thinking block. Keep its position so mixed histories
+			// still consume assistant_part_order correctly, but never forge a
+			// signed block when the user switches providers.
+			reasoning = append(reasoning, anthropicContentBlock{})
+			continue
+		}
+		hasAnthropicReasoning = true
 		block := anthropicContentBlock{Type: "thinking", Thinking: part.GetText(), Signature: part.GetSignature()}
 		if part.GetIsRedacted() {
 			block = anthropicContentBlock{Type: "redacted_thinking", Data: part.GetRedactedData()}
 		}
 		reasoning = append(reasoning, block)
+	}
+	if !hasAnthropicReasoning {
+		// Normal text and tool calls remain in message. Generic reasoning is
+		// retained separately for providers that accept reasoning_content.
+		return nil, nil
 	}
 	if parts := native.GetAssistantTextParts(); len(parts) > 0 {
 		for _, part := range parts {
@@ -117,6 +132,8 @@ func decodeInferenceAnthropicContent(native *inferencev1.InferenceCoreMessage, m
 	for _, block := range blocks {
 		var value map[string]any
 		switch block.Type {
+		case "": // unsigned generic reasoning placeholder
+			continue
 		case "thinking":
 			value = map[string]any{"type": block.Type, "thinking": block.Thinking, "signature": block.Signature}
 		case "redacted_thinking":

@@ -1,5 +1,8 @@
 # Windows and native Cursor validation
 
+For the later genuine-account Cursor 3.32.4 desktop checks, model picker, and
+remaining Plan failure, see [the follow-up report](windows-native-desktop-followup.md).
+
 Updated: 2026-11-26. Live UI checks used Windows Cursor 3.31.15; the installation
 later updated to 3.32.4 before the final pure-consumer checks. Initial repository baseline
 `519591e23ae2c75eef4312ae574e67a987eecb87`.
