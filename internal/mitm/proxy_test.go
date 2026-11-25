@@ -19,13 +19,11 @@ func TestNormalizeHost(t *testing.T) {
 }
 
 func TestShouldMITMHost(t *testing.T) {
-	// Cursor's own hosts must be intercepted, with or without a port and
+	// The BYOK API host must be intercepted, with or without a port and
 	// regardless of case.
 	intercepted := []string{
 		"api2.cursor.sh",
 		"api2.cursor.sh:443",
-		"authentication.cursor.sh:443",
-		"prod.authentication.cursor.sh:443",
 		"API2.CURSOR.SH:443",
 	}
 	for _, h := range intercepted {
@@ -38,6 +36,9 @@ func TestShouldMITMHost(t *testing.T) {
 	// that merely contain a Cursor host as a substring — must be tunnelled
 	// through untouched so their real TLS is preserved.
 	tunnelled := []string{
+		"authentication.cursor.sh:443",
+		"prod.authentication.cursor.sh:443",
+		"AUTHENTICATION.CURSOR.SH:443",
 		"discord.com:443",
 		"gateway.discord.gg:443",
 		"www.google.com:443",
@@ -54,32 +55,25 @@ func TestShouldMITMHost(t *testing.T) {
 }
 
 // TestCursorHostClassification guards the request-handler routing layer: the
-// api2/auth classification must agree with the CONNECT-time MITM decision for
-// differently-cased hosts and non-443 ports, so an intercepted Cursor request
-// is never left to fall through to the upstream.
+// API classification agrees with the CONNECT-time MITM decision. Native auth
+// hosts must remain outside this boundary so login and refresh are untouched.
 func TestCursorHostClassification(t *testing.T) {
 	api2 := []string{"api2.cursor.sh", "api2.cursor.sh:443", "API2.CURSOR.SH:443", "api2.cursor.sh:8443"}
 	for _, h := range api2 {
 		if !isCursorAPI2Host(h) {
 			t.Errorf("isCursorAPI2Host(%q) = false, want true", h)
 		}
-		if isCursorAuthHost(h) {
-			t.Errorf("isCursorAuthHost(%q) = true, want false", h)
-		}
 	}
 
 	auth := []string{"authentication.cursor.sh:443", "AUTHENTICATION.CURSOR.SH:443", "prod.authentication.cursor.sh:8443"}
 	for _, h := range auth {
-		if !isCursorAuthHost(h) {
-			t.Errorf("isCursorAuthHost(%q) = false, want true", h)
-		}
-		if isCursorAPI2Host(h) {
-			t.Errorf("isCursorAPI2Host(%q) = true, want false", h)
+		if isCursorAPI2Host(h) || shouldMITMHost(h) {
+			t.Errorf("authentication host %q must remain tunnelled", h)
 		}
 	}
 
 	for _, h := range []string{"discord.com:443", "cursor.sh:443", "api2.cursor.sh.attacker.example:443"} {
-		if isCursorAPI2Host(h) || isCursorAuthHost(h) {
+		if isCursorAPI2Host(h) {
 			t.Errorf("host %q must not classify as a Cursor host", h)
 		}
 	}

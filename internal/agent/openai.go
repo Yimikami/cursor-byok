@@ -17,14 +17,14 @@ import (
 
 // openAIRequest is the minimal subset of the chat-completions schema we use.
 type openAIRequest struct {
-	Model           string              `json:"model"`
-	Messages        []openAIMessage     `json:"messages"`
-	Stream          bool                `json:"stream"`
-	Tools           []openAITool        `json:"tools,omitempty"`
-	StreamOptions   *openAIStreamOpts   `json:"stream_options,omitempty"`
-	MaxTokens       int                 `json:"max_tokens,omitempty"`
-	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
-	ServiceTier     string              `json:"service_tier,omitempty"`
+	Model           string            `json:"model"`
+	Messages        []openAIMessage   `json:"messages"`
+	Stream          bool              `json:"stream"`
+	Tools           []openAITool      `json:"tools,omitempty"`
+	StreamOptions   *openAIStreamOpts `json:"stream_options,omitempty"`
+	MaxTokens       int               `json:"max_tokens,omitempty"`
+	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
+	ServiceTier     string            `json:"service_tier,omitempty"`
 }
 
 type openAIStreamOpts struct {
@@ -44,6 +44,9 @@ type openAIMessage struct {
 	ToolCallID string              `json:"tool_call_id,omitempty"`
 	Name       string              `json:"name,omitempty"`
 	ToolCalls  []openAIToolCallMsg `json:"tool_calls,omitempty"`
+	// Private provider replay metadata; never leak Anthropic blocks into an
+	// OpenAI-compatible request's JSON.
+	AnthropicContent json.RawMessage `json:"-"`
 }
 
 func textMessage(role, text string) openAIMessage {
@@ -52,9 +55,9 @@ func textMessage(role, text string) openAIMessage {
 }
 
 type openAIContentPart struct {
-	Type     string              `json:"type"`
-	Text     string              `json:"text,omitempty"`
-	ImageURL *openAIImageURL     `json:"image_url,omitempty"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
 }
 
 type openAIImageURL struct {
@@ -142,11 +145,12 @@ type openAIDelta func(content string, reasoning string, done bool) error
 // "tool_calls", "length", etc.) so the agent loop knows whether to expect
 // another round after running the tools.
 type streamResult struct {
-	RequestBody  []byte
-	SSERaw       []byte
-	ToolCalls    []PendingToolCall
-	FinishReason string
-	Usage        *openAIUsage
+	RequestBody      []byte
+	SSERaw           []byte
+	ToolCalls        []PendingToolCall
+	FinishReason     string
+	Usage            *openAIUsage
+	AnthropicContent json.RawMessage
 }
 
 // streamOpenAI sends a chat-completion request to baseURL and invokes onDelta
@@ -258,6 +262,9 @@ func streamOpenAI(
 		if payload == "[DONE]" {
 			flushToolCalls(toolAccs, result)
 			result.SSERaw = sseBuf.Bytes()
+			if err := validateProviderToolCalls(result.ToolCalls); err != nil {
+				return result, err
+			}
 			return result, onDelta("", "", true)
 		}
 		var chunk openAIStreamChunk
@@ -306,6 +313,9 @@ func streamOpenAI(
 	}
 	flushToolCalls(toolAccs, result)
 	result.SSERaw = sseBuf.Bytes()
+	if err := validateProviderToolCalls(result.ToolCalls); err != nil {
+		return result, err
+	}
 	return result, onDelta("", "", true)
 }
 
@@ -339,9 +349,8 @@ func flushToolCalls(accs map[int]*accTC, result *streamResult) {
 	}
 	for _, idx := range indices {
 		acc := accs[idx]
-		if acc.Name == "" {
-			continue
-		}
+		// Preserve malformed entries for whole-batch validation. Dropping an
+		// unnamed call could make the remaining calls execute as a partial batch.
 		result.ToolCalls = append(result.ToolCalls, PendingToolCall{
 			ID:        acc.ID,
 			Name:      acc.Name,
@@ -354,7 +363,7 @@ var validReasoningEfforts = map[string]string{
 	"low":     "low",
 	"medium":  "medium",
 	"high":    "high",
-	"xhigh":  "xhigh",
+	"xhigh":   "xhigh",
 	"none":    "low",
 	"extreme": "xhigh",
 	"max":     "xhigh",

@@ -26,8 +26,9 @@ type proxyLifecycle struct {
 	newServer    func() (proxyServer, error)
 	applyTweaks  func(string) error
 	revertTweaks func() error
-	injectAuth   func(string) error
+	prepareAuth  func(string) error
 	restoreAuth  func(string) error
+	restoreModel func(string) error
 	selectModel  func(string) error
 	enableProxy  func(string) error
 	disableProxy func() error
@@ -55,9 +56,16 @@ func (s *ProxyService) lifecycleOps() *proxyLifecycle {
 		},
 		applyTweaks:  cursor.ApplyCursorTweaks,
 		revertTweaks: cursor.RevertCursorTweaks,
-		injectAuth:   cursor.InjectFakeProUser,
+		prepareAuth:  cursor.PrepareCursorAuth,
 		restoreAuth:  cursor.RestoreFakeProUser,
-		selectModel:  cursor.ForceModelSelection,
+		selectModel: func(modelID string) error {
+			var knownIDs []string
+			for _, adapter := range s.gatewayAdapters() {
+				knownIDs = append(knownIDs, adapter.StableID())
+			}
+			return cursor.ForceModelSelectionForAdapters(modelID, s.modelBackupPath(), knownIDs)
+		},
+		restoreModel: cursor.RestoreModelSelection,
 		enableProxy:  cursor.EnableSystemProxy,
 		disableProxy: cursor.DisableSystemProxy,
 	}
@@ -87,21 +95,47 @@ func RecoverInterruptedSession(s *ProxyService) error {
 func (s *ProxyService) recoverInterruptedSessionLocked() error {
 	ops := s.lifecycleOps()
 	var cleanup []error
+	var routingPending bool
 	if err := ops.disableProxy(); err != nil {
+		routingPending = true
 		cleanup = append(cleanup, fmt.Errorf("restore system proxy: %w", err))
 	}
 	if err := ops.revertTweaks(); err != nil {
+		routingPending = true
 		cleanup = append(cleanup, fmt.Errorf("restore Cursor settings: %w", err))
+	}
+	if err := ops.restoreModel(s.modelBackupPath()); err != nil {
+		cleanup = append(cleanup, fmt.Errorf("restore Cursor models: %w", err))
 	}
 	if err := ops.restoreAuth(s.authBackupPath()); err != nil {
 		cleanup = append(cleanup, fmt.Errorf("restore Cursor auth: %w", err))
 	}
+	return s.finishRecoveryLocked(routingPending, cleanup)
+}
+
+// A model/auth sidecar can need another cleanup attempt after routing has
+// already been restored. Keep that pending work separate from an active
+// listener, which is required only while a client may still route through it.
+func (s *ProxyService) finishRecoveryLocked(routingPending bool, cleanup []error) error {
+	if !routingPending && s.proxy != nil {
+		if err := s.proxy.Stop(context.Background()); err != nil {
+			cleanup = append(cleanup, fmt.Errorf("stop listener: %w", err))
+		} else {
+			s.proxy = nil
+		}
+	}
+	s.state.Running = routingPending && s.proxy != nil
+	if !s.state.Running {
+		s.state.StartedAt = 0
+	}
 	err := errors.Join(cleanup...)
 	s.recoveryPending = err != nil
+	s.state.LastError = ""
 	if err != nil {
-		s.state.LastError = "Could not recover the previous session. Retry Stop: " + err.Error()
-	} else {
-		s.state.LastError = ""
+		s.state.LastError = "Recovery incomplete. Retry Stop: " + err.Error()
+		if s.state.Running {
+			s.state.LastError = "Routing recovery incomplete; listener kept running. Retry Stop: " + err.Error()
+		}
 	}
 	return err
 }
@@ -109,9 +143,6 @@ func (s *ProxyService) recoverInterruptedSessionLocked() error {
 func (s *ProxyService) StartProxy() (ProxyState, error) {
 	s.mu.Lock()
 	defer s.unlockLifecycle(s.state.Running, s.state.LastError)
-	if s.state.Running {
-		return s.state, nil
-	}
 	fail := func(err error) (ProxyState, error) {
 		s.state.LastError = err.Error()
 		return s.state, err
@@ -120,6 +151,9 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 		if err := s.recoverInterruptedSessionLocked(); err != nil {
 			return s.state, err
 		}
+	}
+	if s.state.Running {
+		return s.state, nil
 	}
 	ops := s.lifecycleOps()
 	s.state.CAInstalled = ops.caInstalled()
@@ -144,17 +178,25 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 		return fail(err)
 	}
 
-	var tweaksAttempted, authAttempted, proxyAttempted bool
+	var tweaksAttempted, authAttempted, modelAttempted, proxyAttempted bool
 	rollback := func(cause error) (ProxyState, error) {
 		var cleanup []error
+		var routingPending bool
 		if proxyAttempted {
 			if err := ops.disableProxy(); err != nil {
+				routingPending = true
 				cleanup = append(cleanup, fmt.Errorf("restore system proxy: %w", err))
 			}
 		}
 		if tweaksAttempted {
 			if err := ops.revertTweaks(); err != nil {
+				routingPending = true
 				cleanup = append(cleanup, fmt.Errorf("restore Cursor settings: %w", err))
+			}
+		}
+		if modelAttempted {
+			if err := ops.restoreModel(s.modelBackupPath()); err != nil {
+				cleanup = append(cleanup, fmt.Errorf("restore Cursor models: %w", err))
 			}
 		}
 		if authAttempted {
@@ -162,16 +204,12 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 				cleanup = append(cleanup, fmt.Errorf("restore Cursor auth: %w", err))
 			}
 		}
-		if len(cleanup) > 0 {
-			// A client may still point at this port. Keep it reachable, retain
-			// the backups, and let Stop retry instead of stranding its traffic.
-			s.proxy = srv
-			s.state.Running = true
-			s.state.StartedAt = time.Now().Unix()
-			return fail(fmt.Errorf("%w; recovery incomplete, service kept running; retry Stop: %w", cause, errors.Join(cleanup...)))
-		}
-		if err := srv.Stop(context.Background()); err != nil {
-			cause = errors.Join(cause, fmt.Errorf("stop listener: %w", err))
+		s.proxy = srv
+		if err := s.finishRecoveryLocked(routingPending, cleanup); err != nil {
+			if s.state.Running {
+				s.state.StartedAt = time.Now().Unix()
+			}
+			return fail(fmt.Errorf("%w; %s", cause, s.state.LastError))
 		}
 		return fail(cause)
 	}
@@ -184,9 +222,10 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 		return rollback(fmt.Errorf("configure Cursor settings: %w", err))
 	}
 	authAttempted = true
-	if err := ops.injectAuth(s.authBackupPath()); err != nil {
+	if err := ops.prepareAuth(s.authBackupPath()); err != nil {
 		return rollback(fmt.Errorf("configure Cursor auth: %w", err))
 	}
+	modelAttempted = true
 	if err := ops.selectModel(adapters[0].StableID()); err != nil {
 		return rollback(fmt.Errorf("configure Cursor model: %w", err))
 	}
@@ -198,44 +237,16 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 	s.state.Running = true
 	s.state.StartedAt = time.Now().Unix()
 	s.state.LastError = ""
+	s.recoveryPending = false
 	return s.state, nil
 }
 
 func (s *ProxyService) StopProxy() (ProxyState, error) {
 	s.mu.Lock()
 	defer s.unlockLifecycle(s.state.Running, s.state.LastError)
-	if !s.state.Running {
-		if s.recoveryPending {
-			err := s.recoverInterruptedSessionLocked()
-			return s.state, err
-		}
+	if !s.state.Running && !s.recoveryPending {
 		return s.state, nil
 	}
-	ops := s.lifecycleOps()
-	var cleanup []error
-	if err := ops.disableProxy(); err != nil {
-		cleanup = append(cleanup, fmt.Errorf("restore system proxy: %w", err))
-	}
-	if err := ops.revertTweaks(); err != nil {
-		cleanup = append(cleanup, fmt.Errorf("restore Cursor settings: %w", err))
-	}
-	if err := ops.restoreAuth(s.authBackupPath()); err != nil {
-		cleanup = append(cleanup, fmt.Errorf("restore Cursor auth: %w", err))
-	}
-	if err := errors.Join(cleanup...); err != nil {
-		s.state.LastError = "Recovery incomplete; service kept running. Retry Stop: " + err.Error()
-		return s.state, errors.New(s.state.LastError)
-	}
-	var stopErr error
-	if s.proxy != nil {
-		stopErr = s.proxy.Stop(context.Background())
-		s.proxy = nil
-	}
-	s.state.Running = false
-	s.state.StartedAt = 0
-	s.state.LastError = ""
-	if stopErr != nil {
-		s.state.LastError = "Settings restored, but listener shutdown failed: " + stopErr.Error()
-	}
-	return s.state, stopErr
+	err := s.recoverInterruptedSessionLocked()
+	return s.state, err
 }

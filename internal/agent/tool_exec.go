@@ -31,6 +31,12 @@ type pendingResult struct {
 	ch chan *toolResultEnvelope
 }
 
+type toolWaitKey struct{ owner, id string }
+type sequenceWaitKey struct {
+	owner string
+	id    uint32
+}
+
 // toolResultEnvelope bundles what BidiAppend hands us when Cursor finishes
 // running a tool. ResultJSON is what we'll feed OpenAI as the "tool" role
 // message content; ExecClient is the raw proto so we can attach the
@@ -45,39 +51,39 @@ type toolResultEnvelope struct {
 
 var (
 	pendingMu sync.Mutex
-	pending   = map[string]*pendingResult{}
+	pending   = map[toolWaitKey]*pendingResult{}
 	// execIDAlias maps Cursor's generated exec_id ("exec-shell-<nanos>")
 	// back to the OpenAI tool_call_id we registered the waiter under.
 	// Cursor's BidiAppend reply carries the exec_id, not the tool_call_id.
-	execIDAlias = map[string]string{}
+	execIDAlias = map[toolWaitKey]string{}
 	// seqAlias maps ExecServerMessage.Id (numeric sequence we emit) to the
 	// OpenAI tool_call_id. Cursor correlates by this numeric id on every
 	// BidiAppend frame in its streaming reply.
-	seqAlias = map[uint32]string{}
+	seqAlias = map[sequenceWaitKey]string{}
 	// shellAccum tracks per-seq stdout/stderr/exit as ShellStream events
 	// arrive across many BidiAppend frames. Finalised on Exit.
-	shellAccum = map[uint32]*shellAccumState{}
+	shellAccum = map[sequenceWaitKey]*shellAccumState{}
 	// pendingInteraction holds channels for in-flight InteractionQuery
 	// responses, keyed by the InteractionQuery.id we assigned when emitting
 	// the frame. Cursor's BidiAppend delivers AgentClientMessage_InteractionResponse
 	// once the user accepts/rejects the UI prompt (e.g. the "Switch to X?"
 	// dialog), and we forward that verdict back to the model.
-	pendingInteraction = map[uint32]chan *agentv1.InteractionResponse{}
+	pendingInteraction = map[sequenceWaitKey]chan *agentv1.InteractionResponse{}
 )
 
-func registerInteractionWait(id uint32) chan *agentv1.InteractionResponse {
+func registerInteractionWait(owner string, id uint32) chan *agentv1.InteractionResponse {
 	ch := make(chan *agentv1.InteractionResponse, 1)
 	pendingMu.Lock()
-	pendingInteraction[id] = ch
+	pendingInteraction[sequenceWaitKey{owner, id}] = ch
 	pendingMu.Unlock()
 	return ch
 }
 
-func deliverInteractionResponse(resp *agentv1.InteractionResponse) {
+func deliverInteractionResponse(owner string, resp *agentv1.InteractionResponse) {
 	if resp == nil {
 		return
 	}
-	id := resp.GetId()
+	id := sequenceWaitKey{owner, resp.GetId()}
 	pendingMu.Lock()
 	ch := pendingInteraction[id]
 	delete(pendingInteraction, id)
@@ -127,34 +133,48 @@ type shellAccumState struct {
 // registerExecIDAlias remembers that a future BidiAppend with execID
 // (string) OR seq (numeric ExecServerMessage.Id we emitted) should be
 // routed to the waiter registered against toolCallID.
-func registerExecIDAlias(execID string, seq uint32, toolCallID string) {
+func registerExecIDAlias(owner, execID string, seq uint32, toolCallID string) {
 	pendingMu.Lock()
-	execIDAlias[execID] = toolCallID
-	seqAlias[seq] = toolCallID
+	execIDAlias[toolWaitKey{owner, execID}] = toolCallID
+	seqAlias[sequenceWaitKey{owner, seq}] = toolCallID
 	pendingMu.Unlock()
 }
 
-func registerToolWait(toolCallID string) chan *toolResultEnvelope {
+func registerToolWait(owner, toolCallID string) chan *toolResultEnvelope {
 	ch := make(chan *toolResultEnvelope, 1)
 	pendingMu.Lock()
-	pending[toolCallID] = &pendingResult{ch: ch}
+	pending[toolWaitKey{owner, toolCallID}] = &pendingResult{ch: ch}
 	pendingMu.Unlock()
 	return ch
 }
 
-func deliverToolResult(id string, env *toolResultEnvelope) {
+// removeToolWaitLocked releases all routes and shell buffers together, whether
+// a waiter completed, timed out, or was canceled. Caller holds pendingMu.
+func removeToolWaitLocked(key toolWaitKey) *pendingResult {
+	pr := pending[key]
+	delete(pending, key)
+	for exec, target := range execIDAlias {
+		if exec.owner == key.owner && target == key.id {
+			delete(execIDAlias, exec)
+		}
+	}
+	for seq, target := range seqAlias {
+		if seq.owner == key.owner && target == key.id {
+			delete(seqAlias, seq)
+			delete(shellAccum, seq)
+		}
+	}
+	return pr
+}
+
+func deliverToolResult(owner, id string, env *toolResultEnvelope) {
 	pendingMu.Lock()
 	// Accept either the OpenAI tool_call_id or Cursor's exec_id alias.
-	pr := pending[id]
-	if pr == nil {
-		if callID, ok := execIDAlias[id]; ok {
-			pr = pending[callID]
-			delete(pending, callID)
-			delete(execIDAlias, id)
-		}
-	} else {
-		delete(pending, id)
+	key := toolWaitKey{owner, id}
+	if pending[key] == nil {
+		key.id = execIDAlias[key]
 	}
+	pr := removeToolWaitLocked(key)
 	pendingMu.Unlock()
 	if pr != nil {
 		select {
@@ -947,90 +967,94 @@ func newExecID(tool string) string {
 // for shells we accumulate until the Exit event lands and only then
 // deliver a composite result. Non-shell results (Write, Read, Ls, Grep,
 // Delete) arrive as one complete message, so we deliver them immediately.
-func routeExecClientResult(acm *agentv1.AgentClientMessage) {
+func routeExecClientResult(owner string, acm *agentv1.AgentClientMessage) {
 	ecm := acm.GetExecClientMessage()
 	if ecm == nil {
 		return
 	}
-	seq := ecm.GetId()
+	seq := sequenceWaitKey{owner, ecm.GetId()}
 	pendingMu.Lock()
 	callID := seqAlias[seq]
-	pendingMu.Unlock()
-
-	// Shell streaming: accumulate chunks, deliver on Exit.
+	// Late shell events must not recreate an accumulator after the associated
+	// waiter has completed or timed out. Owner is checked before any mutation.
 	if ss := ecm.GetShellStream(); ss != nil {
-		pendingMu.Lock()
+		key := toolWaitKey{owner, callID}
+		if callID == "" || pending[key] == nil {
+			pendingMu.Unlock()
+			return
+		}
 		state := shellAccum[seq]
 		if state == nil {
 			state = &shellAccumState{}
 			shellAccum[seq] = state
 		}
-		pendingMu.Unlock()
-
+		var update *aiserverv1.InteractionUpdate
 		switch evt := ss.GetEvent().(type) {
 		case *agentv1.ShellStream_Start:
 			state.Started = true
-			publishInteractionUpdate(&aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Start{Start: &aiserverv1.ShellStreamStart{}}}}})
+			update = &aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Start{Start: &aiserverv1.ShellStreamStart{}}}}}
 		case *agentv1.ShellStream_Stdout:
 			state.Stdout = append(state.Stdout, []byte(evt.Stdout.GetData())...)
-			publishInteractionUpdate(&aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Stdout{Stdout: &aiserverv1.ShellStreamStdout{Data: evt.Stdout.GetData()}}}}})
+			update = &aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Stdout{Stdout: &aiserverv1.ShellStreamStdout{Data: evt.Stdout.GetData()}}}}}
 		case *agentv1.ShellStream_Stderr:
 			state.Stderr = append(state.Stderr, []byte(evt.Stderr.GetData())...)
-			publishInteractionUpdate(&aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Stderr{Stderr: &aiserverv1.ShellStreamStderr{Data: evt.Stderr.GetData()}}}}})
+			update = &aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Stderr{Stderr: &aiserverv1.ShellStreamStderr{Data: evt.Stderr.GetData()}}}}}
 		case *agentv1.ShellStream_Exit:
 			state.Exited = true
-			state.ExitCode = evt.Exit.GetCode()
-			state.Cwd = evt.Exit.GetCwd()
-			publishInteractionUpdate(&aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Exit{Exit: &aiserverv1.ShellStreamExit{Code: evt.Exit.GetCode(), Cwd: evt.Exit.GetCwd()}}}}})
+			state.ExitCode, state.Cwd = evt.Exit.GetCode(), evt.Exit.GetCwd()
+			update = &aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Exit{Exit: &aiserverv1.ShellStreamExit{Code: evt.Exit.GetCode(), Cwd: evt.Exit.GetCwd()}}}}}
 		}
-		if state.Exited && callID != "" {
-			body, _ := json.Marshal(map[string]any{
-				"exit_code": state.ExitCode,
-				"cwd":       state.Cwd,
-				"stdout":    string(state.Stdout),
-				"stderr":    string(state.Stderr),
-			})
+		var pr *pendingResult
+		var env *toolResultEnvelope
+		if state.Exited {
+			body, _ := json.Marshal(map[string]any{"exit_code": state.ExitCode, "cwd": state.Cwd, "stdout": string(state.Stdout), "stderr": string(state.Stderr)})
 			finalState := *state
-			pendingMu.Lock()
-			delete(shellAccum, seq)
-			delete(seqAlias, seq)
-			pendingMu.Unlock()
-			deliverToolResult(callID, &toolResultEnvelope{
-				ResultJSON: string(body),
-				ShellAccum: &finalState,
-			})
+			env = &toolResultEnvelope{ResultJSON: string(body), ShellAccum: &finalState}
+			pr = removeToolWaitLocked(key)
+		}
+		pendingMu.Unlock()
+		if update != nil {
+			publishInteractionUpdate(update)
+		}
+		if pr != nil {
+			select {
+			case pr.ch <- env:
+			default:
+			}
 		}
 		return
 	}
-
-	// Non-shell result — marshal whole ExecClientMessage and deliver.
+	pendingMu.Unlock()
 	body, err := json.Marshal(ecm)
 	if err != nil {
 		return
 	}
 	env := &toolResultEnvelope{ResultJSON: string(body), ExecClient: ecm}
 	if id := ecm.GetExecId(); id != "" {
-		deliverToolResult(id, env)
+		deliverToolResult(owner, id, env)
 		return
 	}
 	if callID != "" {
-		pendingMu.Lock()
-		delete(seqAlias, seq)
-		pendingMu.Unlock()
-		deliverToolResult(callID, env)
+		deliverToolResult(owner, callID, env)
 		return
 	}
-	// Legacy fallback: single pending waiter gets everything.
+	// Older clients omit both identifiers. Keep the compatibility fallback
+	// confined to one owner's sole outstanding waiter.
+	if ecm.GetId() != 0 {
+		return
+	}
 	pendingMu.Lock()
 	var only string
 	count := 0
-	for id := range pending {
-		only = id
-		count++
+	for key := range pending {
+		if key.owner == owner {
+			only = key.id
+			count++
+		}
 	}
 	pendingMu.Unlock()
 	if count == 1 {
-		deliverToolResult(only, env)
+		deliverToolResult(owner, only, env)
 	}
 }
 
@@ -1378,27 +1402,7 @@ func waitForToolResult(ch chan *toolResultEnvelope, timeout time.Duration) *tool
 }
 
 func waitForToolResultContext(ctx context.Context, ch chan *toolResultEnvelope, timeout time.Duration) *toolResultEnvelope {
-	defer func() {
-		pendingMu.Lock()
-		defer pendingMu.Unlock()
-		for id, waiting := range pending {
-			if waiting.ch != ch {
-				continue
-			}
-			delete(pending, id)
-			for exec, target := range execIDAlias {
-				if target == id {
-					delete(execIDAlias, exec)
-				}
-			}
-			for seq, target := range seqAlias {
-				if target == id {
-					delete(seqAlias, seq)
-					delete(shellAccum, seq)
-				}
-			}
-		}
-	}()
+	defer releaseToolWait(ch)
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
@@ -1408,5 +1412,15 @@ func waitForToolResultContext(ctx context.Context, ch chan *toolResultEnvelope, 
 		return env
 	case <-timer.C:
 		return &toolResultEnvelope{Error: "tool execution timed out after " + timeout.String()}
+	}
+}
+
+func releaseToolWait(ch chan *toolResultEnvelope) {
+	pendingMu.Lock()
+	defer pendingMu.Unlock()
+	for id, waiting := range pending {
+		if waiting.ch == ch {
+			removeToolWaitLocked(id)
+		}
 	}
 }

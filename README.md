@@ -8,7 +8,7 @@
 
 A local desktop app that turns the Cursor IDE into a **Bring-Your-Own-Key** client.
 cursor-byok runs an on-device HTTPS MITM proxy, intercepts Cursor's traffic to
-`api2.cursor.sh`, forges a logged-in "Pro" session, and translates Cursor's
+`api2.cursor.sh`, preserves your signed-in Cursor account, and translates Cursor's
 proprietary Connect-RPC / WebSocket agent protocol into **OpenAI Chat Completions** against
 any OpenAI-compatible or Anthropic provider you configure.
 
@@ -22,18 +22,20 @@ any OpenAI-compatible or Anthropic provider you configure.
 
 - **BYOK gateway** — use OpenAI, Anthropic, or any OpenAI-compatible endpoint
   (Groq, OpenRouter, local vLLM/llama.cpp, etc.) as the backing model.
-- **Full agent loop** — tool calls, file reads/writes, shell exec, MCP tools,
-  Plan mode with live `.plan.md` panel updates, mode switching (Agent / Ask /
-  Plan / Debug) — all routed through your own model.
-- **Drop-in for Cursor** — no Cursor Pro account needed. A synthetic Pro session is
-  injected into Cursor's local SQLite so the chat picker and agent UI behave as
-  if you were signed in.
+- **Agent and local inference bridge** — translate native tool schemas, messages,
+  tool results and model output while Cursor runs its local tools. Current
+  mode metadata covers Agent, Ask, Plan, Debug and Multitask. See the
+  [feature validation matrix](docs/native-feature-validation.md) for observed
+  results and remaining desktop checks.
+- **Native account continuity** — keep your existing Cursor account, real plan,
+  plugins, updates and authentication. Server-hosted features retain Cursor's
+  normal account and subscription requirements.
 - **System tray app** — built with Wails 3 (Go backend + Vue 3 frontend), start
   / stop the service from the tray, edit adapters from the dashboard.
-- **Usage stats** — per-model token totals and a 7-day prompt/completion chart
+- **Legacy agent usage stats** — per-model token totals and a 7-day prompt/completion chart
   aggregated from persisted per-turn artifacts. No pricing estimates — BYOK
   providers bill wildly differently.
-- **Conversation persistence** — every turn is written to
+- **Legacy agent persistence** — server-loop turns are written to
   `%APPDATA%/cursor-byok/history/<conversation-id>/` so chats survive restarts.
 
 ---
@@ -46,13 +48,13 @@ Cursor IDE
     ▼
 cursor-byok MITM
     │  handles Cursor's agent and model endpoints locally,
-    │  404s everything else so Cursor's BYOK picker stays happy
+    │  forwards other native requests unchanged to Cursor
     ▼
 Agent loop  ─────►  OpenAI Chat Completions / Anthropic Messages
     │              (your provider, your API key)
     ▼
 Cursor receives native agent messages over WebSocket v1 or legacy
-AgentService / BidiService Connect-SSE.
+AgentService / InferenceService / BidiService Connect-SSE.
 ```
 
 Core agent and model endpoints:
@@ -61,14 +63,18 @@ Core agent and model endpoints:
 | ------------------------------------------------- | --------------------------------------- |
 | `/agent/v1/run`                                 | bidirectional WebSocket v1 agent stream |
 | `/aiserver.v1.BidiService/BidiAppend`             | user input / tool results / UI verdicts |
-| `/agent.v1.AgentService/RunSSE`                   | streamed agent output                   |
+| `/agent.v1.AgentService/RunSSE`                   | legacy streamed agent output            |
+| `/aiserver.v1.InferenceService/RunInferenceSSE` | current local agent inference fallback |
 | `/aiserver.v1.AiService/AvailableModels`          | synthetic (your BYOK adapters)          |
+| `/aiserver.v1.AiService/GetDefaultModel`         | default from your configured BYOK models |
 | `/aiserver.v1.AiService/GetDefaultModelNudgeData` | synthetic default-model hint            |
 
-The proxy also handles commit-message, BugBot, and background-composer RPCs.
-Other paths on `api2.cursor.sh` and Cursor's auth hosts are 404'd on
-purpose — any auxiliary RPC returning real upstream data can flip Cursor's chat
-picker into "BYOK not allowed" and hide the injected models.
+The proxy also handles chat titles, branch/commit generation and BugBot.
+Cloud background-agent RPCs and other native requests pass through to Cursor
+with their original authentication and verified upstream TLS. Cloud model
+preferences remain native; local BYOK IDs are not advertised as cloud defaults.
+Authentication hosts and unrelated HTTPS are tunneled. No subscription or
+account identity is fabricated.
 
 Non-Cursor hosts are not intercepted; their HTTPS traffic is tunneled straight
 through.
@@ -87,7 +93,7 @@ it does not establish compatibility with every Cursor release or feature.
   - **Windows 10/11 (64-bit):** full supported path
   - **macOS:** supported with automatic CA install into the current user's login keychain
   - **Linux:** supported with Cursor settings tweaks plus CA trust via the user's NSS DB when `certutil` is installed; otherwise manual CA import is required for full HTTPS MITM trust
-- **Cursor IDE** installed and closed the first time you enable the service.
+- **Cursor IDE** installed, signed in with your own account, and fully quit before starting or stopping the service.
 - **Go** ≥ 1.25
 - **Node.js** ≥ 18 and **npm**
 - **Wails 3 CLI** (`go-task`-backed):
@@ -166,15 +172,19 @@ dashboards.
    - **API key**, **Model ID** (e.g. `gpt-4o`, `claude-3-5-sonnet-latest`,
      `openai/gpt-oss-20b`)
    - Optional: reasoning effort, service tier, max output tokens, thinking budget.
-6. Back on **Overview**, click **Start service**. This:
+6. Fully quit Cursor (Cmd-Q on macOS), then back on **Overview**, click **Start service**. This:
    - Checks the active CA's trust (Windows/macOS) and requires a configured model
    - Starts the local listener and prepares Cursor before changing the system proxy
    - Enables the system proxy on Windows and macOS
    - Leaves Linux system proxy untouched, but writes Cursor's own proxy settings so Cursor itself routes through `127.0.0.1:18080`
-   - Writes `http.proxy` / `http.proxyStrictSSL: false` and related Cursor settings (originals backed up)
-   - Injects the synthetic Pro session into Cursor's `state.vscdb` (originals backed up to `cursor-auth-backup.json`)
+   - Writes `http.proxy` / `http.proxyStrictSSL: true` and system certificate settings (originals backed up)
+   - Preserves your existing Cursor sign-in; recovers legacy account backups if present
+   - Temporarily selects your configured BYOK model for local features (original preferences backed up); cloud-agent selections remain native
 7. Open Cursor. Your adapter appears in the model picker. Chat away.
-8. Click **Stop service** when done — proxy state, Cursor settings, and auth are restored to what they were before.
+8. Fully quit Cursor, then click **Stop service**. Proxy state, Cursor settings, auth, and model preferences are restored. Reopen Cursor afterwards.
+
+Cursor caches account and model settings in memory. Keeping it open during Start
+or Stop can hide the updated values or write its cached values back over a restore.
 
 If setup fails, the service restores changes already made and reports the failing
 step. If restoration fails, it keeps the listener available and retains the
@@ -213,11 +223,14 @@ Under the user config root for your platform:
 | `ca/`                                 | self-signed root CA used for MITM                 |
 | `sysproxy-backup.json`                | original system proxy; kept until restoration succeeds |
 | `cursor-settings-backup.json`         | original Cursor proxy/certificate settings      |
-| `cursor-auth-backup.json`             | your original Cursor auth, restored on Stop       |
+| `cursor-auth-backup.json`             | legacy account backup, restored during migration; new sessions preserve auth |
+| `cursor-model-backup.json`            | original model preferences, restored without replacing unrelated preferences |
 | `history/<conv-id>/conversation.json` | ordered turn log                                  |
 | `history/<conv-id>/turns/NNNNNN/`     | per-turn request / SSE / summary artifacts        |
 
-The Stats tab aggregates every `turns/*/summary.json` on disk.
+The Stats tab aggregates every `turns/*/summary.json` on disk. Current local-loop
+InferenceService conversations remain in Cursor's native history; their usage
+is returned to Cursor but is not yet added to this legacy dashboard history.
 
 ---
 
@@ -280,7 +293,7 @@ configured adapter.
   - **macOS:** current-user login keychain
   - **Linux:** user NSS DB (`~/.pki/nssdb`) when `certutil` is available; otherwise you must import the CA manually into the trust stores you use
 - **Linux has no single vendor-neutral trust store.** Automatic NSS import covers Chromium/Electron-style consumers that use NSS, but not every distro, browser, or CLI stack. Manual trust may still be required.
-- **Cursor's settings.json and SQLite store are modified.** Proxy/settings and auth backups are restored on Stop or recovered on the next app launch. Forced termination can interrupt that process; keep the recovery files. Model picker preferences are pinned separately and are not restored by the auth backup.
+- **Cursor's settings.json and SQLite store are modified.** Proxy/settings and model preference backups are restored on Stop or recovered on the next app launch. Fully quit Cursor before changing service state so its in-memory cache cannot overwrite restored values. Forced termination can interrupt recovery; keep the backup files.
 - **API keys are stored in plain text** in cursor-byok's `config.json` with user-only permissions where supported. If that's not acceptable for your threat model, don't use this.
 - **Cursor's protocol is proprietary.** cursor-byok tracks behavioural fidelity with specific Cursor versions; a Cursor update can break it at any time.
 - **This project is not affiliated with or endorsed by Anysphere / Cursor.** All trademarks belong to their respective owners.

@@ -5,25 +5,39 @@ import (
 
 	"google.golang.org/protobuf/encoding/protowire"
 )
-// buildGetDefaultModelNudgeDataResponse mirrors the working app's reply to
-// /aiserver.v1.AiService/GetDefaultModelNudgeData. Capture format (21 B):
-//
-//   0a 01 30                       field 1 (bytes), len 1, value "0"
-//   1a 10 <16 ASCII hex bytes>     field 3 (bytes), len 16, model_id hex
-//
-// Field 1 looks like a category / nudge_type (the literal character "0", not
-// the numeric zero) and field 3 is the recommended default model. Cursor's
-// chat picker queries this on every open and shows nothing if the call fails
-// — returning the BYOK hex here makes the picker accept our model as the
-// suggested default.
+
+// Cursor 3.32.4 fetches this after AvailableModels. An upstream Auto default
+// can replace the BYOK selection even though the injected catalog contains
+// only configured adapters. Keep both default variants inside that catalog.
+// next_default_set_date="0" does not schedule a later forced selection reset.
+func buildGetDefaultModelResponse(adapters []AdapterInfo) []byte {
+	if len(adapters) == 0 {
+		return nil
+	}
+	id := adapters[0].StableID()
+	out := appendString(nil, 1, id) // model
+	out = appendString(out, 2, id)  // thinking_model
+	out = appendBool(out, 3, false) // max_mode
+	return appendString(out, 4, "0")
+}
+
+// The shipped schema defines field 1 as nudge_date and repeated field 3 as
+// models_with_no_default_switch. Disable scheduled model nudges and preserve
+// every configured BYOK choice, not just the highest-priority adapter.
 func buildGetDefaultModelNudgeDataResponse(adapters []AdapterInfo) []byte {
 	if len(adapters) == 0 {
 		return nil
 	}
-	hexID := adapters[0].StableID()
 	out := make([]byte, 0, 32)
 	out = appendString(out, 1, "0")
-	out = appendString(out, 3, hexID)
+	seen := map[string]bool{}
+	for _, adapter := range adapters {
+		id := adapter.StableID()
+		if adapter.ModelID != "" && !seen[id] {
+			out = appendString(out, 3, id)
+			seen[id] = true
+		}
+	}
 	return out
 }
 
@@ -61,17 +75,17 @@ func buildAvailableModelsResponse(adapters []AdapterInfo) []byte {
 	first := adapters[0]
 	hexID := first.StableID()
 
-	// FeatureModelConfig fields. Working app populates all of:
+	// FeatureModelConfig fields for locally executed features:
 	//   4 composer_model_config        (default + fallback + best_of_n)
 	//   5 cmd_k_model_config           (default + fallback)
-	//   6 background_composer_model_config (default + fallback + best_of_n)
+	// Field 6 (cloud background composer) is deliberately omitted: a local
+	// BYOK identifier is not a model supported by Cursor's cloud backend.
 	//   7 plan_execution_model_config  (default + fallback)
 	//   8 spec_model_config            (default only)
 	//   9 deep_search_model_config     (default only)
 	//  10 quick_agent_model_config     (default only)
 	buf = appendFeatureCfg(buf, 4, hexID, true, true)
 	buf = appendFeatureCfg(buf, 5, hexID, true, false)
-	buf = appendFeatureCfg(buf, 6, hexID, true, true)
 	buf = appendFeatureCfg(buf, 7, hexID, true, false)
 	buf = appendFeatureCfg(buf, 8, hexID, false, false)
 	buf = appendFeatureCfg(buf, 9, hexID, false, false)

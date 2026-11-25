@@ -177,8 +177,20 @@ func HandleRunSSE(
 		return
 	}
 	requestID := bid.GetRequestId()
+	ctx, detach, inputErrors, err := attachLegacyBidi(ctx, requestID, "agent", applyAgentBidiPayload)
+	if err != nil {
+		writeEndStreamError(w, err.Error())
+		return
+	}
+	defer detach()
 	sess := WaitForSession(ctx, requestID)
 	if sess == nil || sess.UserText == "" {
+		select {
+		case err := <-inputErrors:
+			writeEndStreamError(w, err.Error())
+			return
+		default:
+		}
 		writeEndStreamError(w, "no session/user text for request_id="+requestID)
 		return
 	}
@@ -330,6 +342,7 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 		// Record this round's assistant message (including any tool_calls)
 		// in the running message list so the next round sees the context.
 		assistantMsg := textMessage("assistant", roundBuf.String())
+		assistantMsg.AnthropicContent = result.AnthropicContent
 		if len(result.ToolCalls) > 0 {
 			for _, tc := range result.ToolCalls {
 				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, openAIToolCallMsg{
@@ -383,7 +396,7 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 				// Without this the model says "switched to X mode" before
 				// the user has even clicked Approve.
 				if interaction != nil && pc.Name == "SwitchMode" {
-					waitCh := registerInteractionWait(interaction.GetId())
+					waitCh := registerInteractionWait(requestID, interaction.GetId())
 					_ = writeInteractionQuery(w, interaction)
 					verdict := waitForInteractionResponse(ctx, waitCh, 45*time.Second)
 					switch {
@@ -445,8 +458,9 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 			// seqAlias/shellAccum entry. See nextExecSeq doc for the bug
 			// this replaces.
 			seq := nextExecSeq()
-			waitCh := registerToolWait(pc.ID)
-			registerExecIDAlias(execID, seq, pc.ID)
+			waitCh := registerToolWait(requestID, pc.ID)
+			defer releaseToolWait(waitCh)
+			registerExecIDAlias(requestID, execID, seq, pc.ID)
 			if err := writeExecRequest(w, execID, seq, pc, tc); err != nil {
 				writeEndStreamError(w, err.Error())
 				DropSession(requestID)

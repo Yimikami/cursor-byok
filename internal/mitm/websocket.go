@@ -35,11 +35,11 @@ func (w *upgradeResponse) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return w.conn, bufio.NewReadWriter(bufio.NewReader(w.conn), bufio.NewWriter(w.conn)), nil
 }
 
-func handleAgentWebSocket(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver) *http.Response {
+func handleAgentWebSocket(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver, authorize localAuthorizer) *http.Response {
 	acceptedProtocol := false
 	for _, p := range strings.Split(req.Header.Get("Sec-WebSocket-Protocol"), ",") {
 		p = strings.TrimSpace(p)
-		if p == "cursor-agent-v1" || p == "cursor-agent-preconnect-v1" {
+		if p == "cursor-agent-v1" || p == "cursor-agent-preconnect-v1" || p == "cursor-run-inference-v1" || p == "cursor-run-inference-preconnect-v1" {
 			acceptedProtocol = true
 			break
 		}
@@ -49,7 +49,7 @@ func handleAgentWebSocket(req *http.Request, serverCtx context.Context, resolver
 	}
 	proxyEnd, agentEnd := net.Pipe()
 	w := &upgradeResponse{header: make(http.Header), conn: agentEnd}
-	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{Subprotocols: []string{"cursor-agent-v1", "cursor-agent-preconnect-v1"}})
+	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{Subprotocols: []string{"cursor-agent-v1", "cursor-agent-preconnect-v1", "cursor-run-inference-v1", "cursor-run-inference-preconnect-v1"}})
 	if err != nil {
 		_ = proxyEnd.Close()
 		_ = agentEnd.Close()
@@ -57,7 +57,19 @@ func handleAgentWebSocket(req *http.Request, serverCtx context.Context, resolver
 	}
 	ctx, cancel := context.WithCancel(req.Context())
 	stop := context.AfterFunc(serverCtx, cancel)
-	go func() { defer cancel(); defer stop(); agent.HandleAgentWebSocket(ctx, conn, resolver) }()
+	go func() {
+		defer cancel()
+		defer stop()
+		agent.HandleAgentWebSocket(ctx, conn, resolver, func(headers http.Header) bool {
+			if authorize == nil {
+				return false
+			}
+			if len(headers.Values("Authorization")) == 0 {
+				headers = req.Header
+			}
+			return authorize(ctx, headers)
+		})
+	}()
 	// goproxy treats Content-Length: 0 as intentional and does not add chunked
 	// transfer encoding to this upgrade response.
 	w.header.Set("Content-Length", "0")
