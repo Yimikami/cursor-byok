@@ -132,7 +132,7 @@ func TestInferenceAnthropicPreservesSignedToolTurn(t *testing.T) {
 	}
 }
 
-func TestInferenceAnthropicRejectsUnsignedReplayBeforeProvider(t *testing.T) {
+func TestInferenceAnthropicRejectsInvalidNativeReplayBeforeProvider(t *testing.T) {
 	var calls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -145,7 +145,9 @@ func TestInferenceAnthropicRejectsUnsignedReplayBeforeProvider(t *testing.T) {
 			if native {
 				assistant = append(assistant, providerProtoString(18, `[{"type":"thinking","thinking":"unsigned"},{"type":"text","text":"hello"}]`)...)
 			} else {
-				assistant = append(assistant, providerProtoBytes(7, providerProtoString(2, "unsigned"))...)
+				// A redacted Anthropic part must still carry its opaque data.
+				// Plain unsigned reasoning can come from a different provider.
+				assistant = append(assistant, providerProtoBytes(7, providerProtoVarint(1, 1))...)
 				assistant = append(assistant, providerProtoString(17, "hello")...)
 				assistant = append(assistant, providerProtoVarint(16, 1)...)
 				assistant = append(assistant, providerProtoVarint(16, 2)...)
@@ -153,7 +155,7 @@ func TestInferenceAnthropicRejectsUnsignedReplayBeforeProvider(t *testing.T) {
 			request := append(providerTestRequest(), providerProtoBytes(1, assistant)...)
 			err := runInferenceProvider(context.Background(), request, AdapterTarget{ProviderType: "anthropic", BaseURL: provider.URL, APIKey: "key", Model: "test"}, func([]byte) error { return nil })
 			if err == nil {
-				t.Fatal("unsigned thinking was accepted for Anthropic replay")
+				t.Fatal("invalid native thinking was accepted for Anthropic replay")
 			}
 		})
 	}

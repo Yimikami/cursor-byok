@@ -173,6 +173,14 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 		if strings.TrimSpace(call.Arguments) == "" {
 			result.ToolCalls[i].Arguments = "{}"
 		}
+		if !custom[call.Name] {
+			for _, tool := range request.GetTools() {
+				if tool.GetName() == call.Name && tool.GetParameters() != nil {
+					result.ToolCalls[i].Arguments = normalizeNativeArguments(result.ToolCalls[i].Arguments, tool.GetParameters().AsMap())
+					break
+				}
+			}
+		}
 		if custom[call.Name] {
 			var wrapped struct {
 				Input *string `json:"input"`
@@ -275,7 +283,7 @@ func translateLocalInferenceRequest(request *inferencev1.InferenceStreamRequest)
 		}
 		parameters := map[string]any{"type": "object", "properties": map[string]any{}}
 		if tool.GetParameters() != nil {
-			parameters = tool.GetParameters().AsMap()
+			parameters = nativeFunctionSchema(tool.GetParameters().AsMap())
 		}
 		description := tool.GetDescription()
 		if format := tool.GetCustomToolFormat(); format != nil {

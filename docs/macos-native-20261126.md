@@ -100,37 +100,31 @@ cloud-subagent, and indexing dependencies also retain their own requirements.
 
 ## Observed model-picker boundary
 
-The live Cursor 3.32.4 **Glass** session displayed only Auto in its model
-picker. The separate **IDE** picker displayed and selected the configured
-model-a model successfully. The restriction described here is therefore specific
-to the observed Glass surface, not a missing adapter or a universal restriction
-on model selection. A narrowly scoped state check confirmed:
+The native picker remains subject to Cursor's genuine account restrictions on
+both macOS and Windows. An initial IDE render displayed the saved model-a name,
+but after restarting Cursor and allowing account metadata to settle, clicking
+the IDE picker showed Auto and “More models are only available on paid plans.”
+The separate Glass surface showed the same restriction. A saved label or an
+early render must not be counted as persistent native model-selection support.
 
-- The genuine account membership was `free`; `useOpenAIKey` was absent.
-- `availableDefaultModels2` contained the configured model-a model
-  (`54c6d6cf3ffb1ef0`) with `defaultOn=true` and
-  `namedModelSectionIndex=1`.
-- Native NameTab and Agent inference requests reached the configured model-a
-  provider, including while the Glass picker remained restricted.
+A narrow check confirmed the genuine account membership was `free`,
+`useOpenAIKey` was absent, and the configured model-a catalog entry was enabled.
+Actual Agent/NameTab/Tab requests still reached the configured BYOK provider.
+Provider routing and native picker availability are separate observations.
 
-The installed Glass workbench explains the restriction. At UTF-16 offset
-`20605240`, the React picker computes its potential free-account lock from
-an authenticated, settled FREE membership with `useOpenAIKey` disabled and
-no active private-inference route. It refreshes membership before confirming
-that lock. `WCu` at offset `13951527` confirms FREE membership only after team
-membership has resolved and no team ID exists. The resulting flag is passed
-as `isFreeUserModelPickerLocked` at offset `20614851`.
+In the installed Glass workbench, UTF-16 offset `20605240` computes a potential
+free-account lock from authenticated, settled FREE membership, disabled
+`useOpenAIKey`, and no private-inference route. It refreshes membership before
+confirming the lock. `WCu` at `13951527` checks resolved team membership as well;
+`isFreeUserModelPickerLocked` is passed at `20614851`. Model field 38 is
+`named_model_section_index`, not an entitlement flag. The runtime IDE check,
+rather than assuming this Glass artifact covers every surface, establishes the
+matching visible restriction in that separate window.
 
-The model record itself is present and enabled. The same artifact's schema at
-`1677174` defines model field 38 as `named_model_section_index`, and the
-catalog filtering method at `9196777` accepts enabled records before applying
-surface-specific and administrator restrictions. Field 38 is a section index,
-not an entitlement or BYOK authorization flag.
-
-No membership, native own-key flag, or protobuf wire value was changed to
-remove this UI restriction. Cursor's account and hosted-feature restrictions
-remain in force. IDE selection, Glass selection, and provider routing are
-reported separately because the observed outcomes differ.
+No membership or native own-key flag was fabricated to remove this restriction.
+PR #16's separate companion selector was evaluated but excluded from this
+release at the user's request. No separate extension or global selection
+override is shipped, and no operating-system-specific picker fix is claimed.
 
 ## Native GenerateImage failure
 
@@ -213,5 +207,27 @@ Cursor was quit before stopping the helper. System HTTP and HTTPS proxies are
 disabled. Exact account fields and owned model preference paths match the
 pre-test snapshot; settings.json is byte-identical to its snapshot. Temporary
 provider configuration was removed. Certificate trust removal exposed a
-separate trust-detection issue and is being verified before finalizing this
-report. Private credential/snapshot files are not committed.
+separate readiness issue: general macOS verification could remain successful
+after exact user/admin trust records were absent. The implementation now checks
+those exact SSL trust records and removes only domains that contain the CA.
+A subsequent install/start succeeded, and Cursor's updater completed with
+`onUpdateNotAvailable()` instead of `ERR_CERT_AUTHORITY_INVALID`. The final
+repeat-test cleanup is recorded separately below. Private credential/snapshot files are not committed.
+
+## Captured follow-up findings
+
+The repeated native GenerateImage invocation on the correctly trusted session
+received HTTP 404, `application/json`, Connect error code `not_found` from the
+Cursor upstream. An observer attached only to this RPC preserved response bytes
+and logged no request body, credentials, image contents or arbitrary error text.
+The RPC is outside the local response table and uses verified native
+passthrough. This narrows the failure to the remote response; no account-plan
+reason was returned and image support is not claimed.
+
+CreatePlan revealed a local defect that the Windows normalizer alone could not
+repair: its advertised parameters were wrapped as `{jsonSchema: {...}}`. The
+provider received the wrapper, and normalization looked at that same wrong
+level. The captured todo argument was a string containing a valid JSON array.
+The follow-up unwraps this exact native container for both provider schemas and
+normalization, while preserving plain schemas and custom tool formats.
+Desktop acceptance after that fix is pending.
