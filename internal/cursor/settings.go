@@ -142,12 +142,9 @@ func readSettings() (map[string]any, error) {
 		}
 		return nil, err
 	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, fmt.Errorf("settings.json is not valid JSON: %w", err)
-	}
-	if m == nil {
-		m = map[string]any{}
+	m, err := decodeSettings(b)
+	if err != nil {
+		return nil, fmt.Errorf("settings.json is not valid JSONC: %w", err)
 	}
 	return m, nil
 }
@@ -196,7 +193,13 @@ func ApplyCursorTweaks(proxyAddr string) error {
 			if err := saveBackup(bk); err != nil {
 				return err
 			}
+		} else if statErr != nil {
+			return fmt.Errorf("inspect settings backup: %w", statErr)
+		} else if _, err := loadBackup(); err != nil {
+			return fmt.Errorf("read settings backup: %w", err)
 		}
+	} else {
+		return fmt.Errorf("could not resolve settings backup path")
 	}
 
 	m["http.proxy"] = "http://" + proxyAddr
@@ -218,8 +221,10 @@ func RevertCursorTweaks() error {
 
 	bk, err := loadBackup()
 	if err != nil {
-		// No backup, nothing to revert.
-		return nil
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read settings backup: %w", err)
 	}
 	m, err := readSettings()
 	if err != nil {
@@ -244,7 +249,9 @@ func RevertCursorTweaks() error {
 	if err := writeSettings(m); err != nil {
 		return err
 	}
-	_ = os.Remove(backupPath())
+	if err := os.Remove(backupPath()); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove restored settings backup: %w", err)
+	}
 	return nil
 }
 
