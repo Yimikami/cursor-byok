@@ -4,8 +4,9 @@ import { ProxyService } from "../../bindings/cursor-byok/internal/bridge";
 import { Window, Events, Browser, System } from "@wailsio/runtime";
 import OpenAIMark from "./logos/OpenAIMark.vue";
 import AnthropicMark from "./logos/AnthropicMark.vue";
+import { captureAdapterProbe, applyAdapterProbeResult, type ModelAdapter } from "../adapterProbe";
 
-const APP_VERSION = "1.0.1";
+import { version as APP_VERSION } from "../../package.json";
 const GITHUB_REPO = "Yimikami/cursor-byok";
 const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
 
@@ -41,22 +42,6 @@ type ProxyState = {
   caInstallMode?: string;
   caWarning?: string;
   lastError?: string;
-};
-
-type ModelAdapter = {
-  displayName: string;
-  type: string;
-  baseURL: string;
-  apiKey: string;
-  modelID: string;
-  contextWindow?: string;
-  supportedThinkingLevels?: string[];
-  serviceTier?: string;
-  maxOutputTokens?: string;
-  thinkingBudget?: string;
-  notes?: string;
-  lastTestResult?: string;
-  lastTestedAt?: number;
 };
 
 type UserConfig = {
@@ -447,19 +432,21 @@ async function saveEditor(runTest = false) {
   } else {
     cfg.value.modelAdapters[editorIndex.value] = editorModel.value;
   }
+  const index = editorIndex.value;
+  const savedEditor = editorModel.value;
+  const probe = captureAdapterProbe(cfg.value.modelAdapters[index]);
   await persistConfig();
   if (runTest) {
     editorTestRunning.value = true;
     try {
-      const updated = (await ProxyService.TestAdapter(
-        editorIndex.value,
-      )) as ModelAdapter;
-      cfg.value.modelAdapters[editorIndex.value] = updated;
+      const updated = (await ProxyService.TestAdapter(index)) as ModelAdapter;
+      const applied = applyAdapterProbeResult(cfg.value.modelAdapters[index], probe, updated);
+      if (applied && editorIndex.value === index && editorModel.value === savedEditor
+        && currentView.value === "editor") currentView.value = "models";
     } finally {
       editorTestRunning.value = false;
     }
-    currentView.value = "models";
-  } else {
+  } else if (editorIndex.value === index && editorModel.value === savedEditor) {
     currentView.value = "models";
   }
 }
@@ -468,12 +455,15 @@ const editorTestRunning = ref(false);
 
 const testingIndex = ref(-1);
 async function testAdapter(i: number) {
+  const row = cfg.value.modelAdapters[i];
+  if (!row) return;
+  const probe = captureAdapterProbe(row);
   testingIndex.value = i;
   try {
     const updated = (await ProxyService.TestAdapter(i)) as ModelAdapter;
-    cfg.value.modelAdapters[i] = updated;
+    applyAdapterProbeResult(cfg.value.modelAdapters[i], probe, updated);
   } finally {
-    testingIndex.value = -1;
+    if (testingIndex.value === i) testingIndex.value = -1;
   }
 }
 

@@ -234,7 +234,9 @@ the adapter list. Configuration writes now publish a synced, private temporary
 file via replacement; a shared lock covers all readers, saves and read/modify/
 write operations. A delayed connectivity probe updates only its unchanged
 adapter's test metadata, preserving settings edited while the request ran.
-Regression tests reproduced both failures before the fix and pass afterward,
+The dashboard also merges only test metadata into the same unchanged row; a
+late response cannot replace an edited/deleted row or target a newly opened editor.
+Regression tests reproduced the backend failures before the fix and pass afterward,
 including concurrent routing reads and failed-publication cleanup.
 
 The repeated native GenerateImage invocation on the correctly trusted session

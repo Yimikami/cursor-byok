@@ -44,7 +44,7 @@ the updated proxy build from this PR.
 | MCP tool | Local stdio fixture connected; native one-time approval; `echo_marker` returned `BYOK_MCP_OK:CURSOR_NATIVE_20261126`. |
 | MCP resource | `fixture://marker` returned `BYOK_RESOURCE_OK`. |
 | Ask | Found `return a - b` in the fixture and returned `ASK_OK`; no edits or shell commands requested. |
-| Plan / Build | Native plan editor and Build button opened. Build created greeting files, updated todos, and ran two passing unittest tests. **CreatePlan's todo-array failure remains open**, as detailed below. |
+| Plan / Build | Native plan editor and Build button opened. Build created greeting files, updated todos, and ran two passing unittest tests. **CreatePlan failed in this Windows run**; the later shared fix passed on macOS, with Windows retest pending. |
 | Debug | Native hypotheses, instrumentation, log panel, reproduction, fix, and cleanup completed. `add(2, 3)` changed from -1 to 5; the explicit regression function passed after instrumentation removal. |
 | Multitask | Two actual native Explorer Task subagents completed; the final response contained the probe marker and `Hello, Alice!`. |
 | Commit generation | Native SCM action populated the message field with a relevant message; no commit or push of the scratch project was performed. |
@@ -56,7 +56,7 @@ the updated proxy build from this PR.
 | Hosted web/image/search | Bounded calls were started and approval cards appeared. The run was stopped when work was redirected to PR preparation; no complete pass is claimed for WebFetch, WebSearch, XSearch, or GenerateImage. |
 | Cloud agents / indexing / browser | No new end-to-end acceptance established in this follow-up. |
 
-## Open CreatePlan issue
+## CreatePlan failure observed on the Windows branch
 
 The live client rejected `todos` with **“expected array, received string”**.
 It created partial plan artifacts before the error, and repeated attempts
@@ -68,9 +68,11 @@ only when the advertised schema explicitly requires an array or object. It
 preserves string fields, ambiguous schemas, unknown properties and invalid
 JSON. Regression tests verify matching stream/final arguments and preservation
 of numeric values. **The live CreatePlan retry still failed after this change.**
-The actual request schema/custom-tool representation must be inspected before
-claiming the Plan issue fixed. A temporary diagnostic build was prepared but
-not run; its overlay and local artifacts are not part of the PR.
+At that point, the actual request schema/custom-tool representation had not
+yet been inspected. The subsequent macOS capture identified the `jsonSchema`
+wrapper; the shared fix passed a real CreatePlan run with two todos on macOS.
+This is not a Windows desktop pass. The temporary Windows diagnostic build
+was not run; its overlay and local artifacts are not part of the PR.
 
 ## Validation and cleanup
 
@@ -85,9 +87,9 @@ not run; its overlay and local artifacts are not part of the PR.
   installed. The earlier test CA remains trusted; no certificate removal is
   claimed. No credentials or raw conversations are included in this PR.
 
-Next: review the model-picker implementation, inspect CreatePlan's actual
-schema, then finish Tab and hosted-service acceptance checks. Merge is reserved
-for the macOS review agent/user; this Windows task did not merge this PR.
+This Windows task ended before final native-picker, corrected CreatePlan, Tab
+and hosted-service acceptance. The later macOS investigation is documented in
+[its own report](macos-native-20261126.md); this Windows task did not merge the PR.
 
 ## Selective integration
 

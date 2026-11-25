@@ -1,7 +1,10 @@
 # Windows and native Cursor validation
 
-For the later genuine-account Cursor 3.32.4 desktop checks, model picker, and
-remaining Plan failure, see [the follow-up report](windows-native-desktop-followup.md).
+For the later genuine-account Cursor 3.32.4 desktop checks and the historical
+Plan failure, see [the follow-up report](windows-native-desktop-followup.md).
+The shared CreatePlan wrapper fix subsequently passed a real macOS retry; the
+final native picker and corrected CreatePlan still need Windows desktop retesting.
+See [the macOS results](macos-native-20261126.md).
 
 Updated: 2026-11-26. Live UI checks used Windows Cursor 3.31.15; the installation
 later updated to 3.32.4 before the final pure-consumer checks. Initial repository baseline

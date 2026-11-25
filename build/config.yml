@@ -11,7 +11,7 @@ info:
   description: "cursor-byok - Local MITM proxy & BYOK gateway for Cursor IDE"
   copyright: "© 2026 cursor-byok"
   comments: "Intercepts Cursor IDE traffic and routes model calls through user-supplied API keys."
-  version: "1.0.1"
+  version: "1.1.0"
   cfBundleIconName: "appicon"
 
 # Dev mode configuration
