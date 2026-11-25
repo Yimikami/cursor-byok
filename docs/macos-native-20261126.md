@@ -98,33 +98,45 @@ The shipped Anthropic computer tool is such a tool (`computer`, provider ID
 not proof of provider-defined computer-use support. Hosted search, image/video,
 cloud-subagent, and indexing dependencies also retain their own requirements.
 
-## Observed model-picker boundary
+## Native model-picker repair
 
-The native picker remains subject to Cursor's genuine account restrictions on
-both macOS and Windows. An initial IDE render displayed the saved model-a name,
-but after restarting Cursor and allowing account metadata to settle, clicking
-the IDE picker showed Auto and “More models are only available on paid plans.”
-The separate Glass surface showed the same restriction. A saved label or an
-early render must not be counted as persistent native model-selection support.
+The initial genuine free-account session reverted to Auto after account metadata
+settled. A saved model-a label was not evidence of a working selector. The separate
+PR #16 companion was excluded at the user's request.
 
-A narrow check confirmed the genuine account membership was `free`,
-`useOpenAIKey` was absent, and the configured model-a catalog entry was enabled.
-Actual Agent/NameTab/Tab requests still reached the configured BYOK provider.
-Provider routing and native picker availability are separate observations.
+The current native client exempts its existing own-key mode from that picker
+lock. Start now backs up and temporarily enables `useOpenAIKey`, without writing
+any native provider key, account token, email, membership, or payment response.
+A nonempty saved-but-disabled OpenAI key record blocks this change, so a key the
+user disabled is not silently reactivated. Both the legacy and encrypted native
+secret locations are checked by presence, without decrypting their contents.
 
-In the installed Glass workbench, UTF-16 offset `20605240` computes a potential
-free-account lock from authenticated, settled FREE membership, disabled
-`useOpenAIKey`, and no private-inference route. It refreshes membership before
-confirming the lock. `WCu` at `13951527` checks resolved team membership as well;
-`isFreeUserModelPickerLocked` is passed at `20614851`. Model field 38 is
-`named_model_section_index`, not an entitlement flag. The runtime IDE check,
-rather than assuming this Glass artifact covers every surface, establishes the
-matching visible restriction in that separate window.
+The catalog also supplies Cursor's native named-model display configuration.
+Without it, the picker opened its routed Auto view; configured models appeared
+only when searching. Cursor merges incoming display objects, so Start clears
+and backs up the previous catalog display and locked-selection caches. Version 3
+preference backups restore these fields and own-key mode exactly; versions 1 and
+2 remain readable for recovery. Cursor must be fully quit before Start or Stop.
 
-No membership or native own-key flag was fabricated to remove this restriction.
-PR #16's separate companion selector was evaluated but excluded from this
-release at the user's request. No separate extension or global selection
-override is shipped, and no operating-system-specific picker fix is claimed.
+Static contract: installed `workbench.desktop.main.js` SHA-256
+`7790e8debe902d9edce3948607f486d870c43d9f565ad6d658c2783309666072`;
+`nxp` at character offset 18,676,740 reads the own-key exception. The separate
+Glass `Erp` implementation has the same exception. Shared native picker code
+filters routed rows by `visibleInRoutedModelView`, while the named list derives
+sections directly from each model's `namedModelSectionIndex`. AvailableModels
+field 15 supplies routed config field 1 / hide field 5, and named config field
+2 / no-button empty message field 3. This matches the shipped private-inference
+display shape; it does not advertise a private gateway or hosted entitlement.
+REA retained artifact identity (`ev_cbf16e90190c674838b222f8e8aef047136e19af97f9d4b2da7cd3d6e035986b`),
+but semantic parsing failed on the large bundle. The behavioral findings are
+bounded inert source reads corroborated by the following real UI checks.
+
+After a clean closed-client Start, the native IDE menu directly listed model-a
+and model-b (provider-b.example), with genuine account membership unchanged.
+Selecting model-a through the native menu successfully ran Read, a real local MCP
+call (`MCP_TOOL_OK PICKER_MCP_OK`), and the local byok-reader Task subagent
+(`PICKER_SUBAGENT_OK`). The final two-provider continuation check is recorded
+below. No companion extension or global model override is shipped.
 
 ## Native GenerateImage failure
 
@@ -230,4 +242,55 @@ provider received the wrapper, and normalization looked at that same wrong
 level. The captured todo argument was a string containing a valid JSON array.
 The follow-up unwraps this exact native container for both provider schemas and
 normalization, while preserving plain schemas and custom tool formats.
-Desktop acceptance after that fix is pending.
+The final desktop retry completed successfully at 02:03:47: Cursor recorded a
+`create_plan_v2` success and wrote `readme_test_note_81745295.plan.md` with
+exactly two pending todos (`read-docs` and `update-docs`). The native transcript
+showed Created Plan / README Test Note. An older plan remained selected in the
+side panel; that stale panel was not mistaken for the newly created file.
+
+
+## Same-conversation provider switching
+
+The user explicitly authorized using the same test key at `provider-b.example`.
+Its `/v1/models` returned `model-b` and the thinking variant. A separate
+synthetic preflight passed streamed tool-call generation and continuation after
+a real local tool result. The native desktop check used the non-thinking model.
+
+Within one existing Cursor conversation, the native menu selected model-a, then
+model-b, then model-a again. Both choices were directly visible without
+searching or a companion command. A scoped observer recorded only the public
+provider host, configured model ID and message count; no key or conversation
+body was logged.
+
+| Local time, 2026-11-26 | Actual provider request | Independent UI result |
+| --- | --- | --- |
+| 02:35:53 / 02:36:00 | `provider-a.example`, `model-a`, 17 then 20 messages | Read `src/calc.py`; returned the unique turn-A marker and correct addition summary. |
+| 02:37:29 / 02:37:34 | `provider-b.example`, `model-b`, 22 then 25 messages | Recalled the marker without it being repeated in the new prompt; preserved the prior Read result, read `src/test_calc.py`, and returned `SWITCH_B_OK`. |
+| 02:39:38 | `provider-a.example`, `model-a`, 27 messages | Recalled the original marker and model-b's `assert add(2, 3) == 5` result, then returned `SWITCH_RETURN_OK`. |
+
+This verifies real outbound model/provider selection and tool-history
+continuation in both directions, rather than trusting a model's self-description.
+It does not attest which underlying weights a third-party provider uses.
+The shared selector implementation has no OS-specific branch; the new native
+picker was exercised live on macOS. Final Windows UI execution is not claimed.
+
+## Final cleanup and checks
+
+Cursor was completely quit before the final service stop. HTTP and HTTPS
+system proxies are disabled, the original exceptions remain, and settings.json
+is byte-identical to its pre-test backup. All five account fields and every
+owned preference match the pre-test snapshot. The display cache from an earlier
+intermediate test (before it was covered by the new backup format) was reconciled
+separately against that snapshot. The service's temporary provider config and
+experimental model catalog were removed.
+
+The CA identity matched the pre-existing CA file. Independent Security.framework
+checks found neither user nor admin trust records (both `errSecItemNotFound`),
+and both CA/leaf verification failed as expected after removing test trust.
+Pre-existing CA files and certificate objects were preserved.
+
+The final full `go test -race -p 2 ./...` and `go vet ./...` passed. The PR review's
+Anthropic stale-input replay and pattern/tuple schema defects were reproduced
+and fixed with targeted regressions. CodeRabbit's first green status was a
+rate-limit skip, not a completed review; follow-up review/CI is assessed before
+publishing.

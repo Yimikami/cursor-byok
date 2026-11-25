@@ -52,7 +52,7 @@ func legacyModelPreferencePaths(includeBackground bool) [][]string {
 }
 
 func captureModelPreferences(d map[string]any) (modelPreferenceBackup, error) {
-	bk := modelPreferenceBackup{Version: 2}
+	bk := modelPreferenceBackup{Version: 3}
 	created := map[string]bool{}
 	for _, path := range modelPreferencePaths() {
 		entry := modelPreference{Path: path}
@@ -94,6 +94,10 @@ func captureModelPreferences(d map[string]any) (modelPreferenceBackup, error) {
 }
 
 func modelPreferencePaths() [][]string {
+	return append(modelPreferencePathsV2(), []string{"useOpenAIKey"}, []string{"modelPickerDisplayConfiguration"}, []string{"lockedModelPickerSelection"})
+}
+
+func modelPreferencePathsV2() [][]string {
 	var paths [][]string
 	for _, path := range legacyModelPreferencePaths(false) {
 		if path[0] == "featureModelConfigs" && path[1] == "backgroundComposer" {
@@ -116,7 +120,7 @@ func readModelBackup(path string) (modelPreferenceBackup, error) {
 	if err := json.Unmarshal(data, &bk); err != nil {
 		return bk, fmt.Errorf("parse model backup: %w", err)
 	}
-	if bk.Version != 1 && bk.Version != 2 {
+	if bk.Version != 1 && bk.Version != 2 && bk.Version != 3 {
 		return bk, errors.New("unsupported model backup version")
 	}
 	allowedPaths, requiredPaths := modelPreferencePaths(), modelPreferencePaths()
@@ -124,6 +128,8 @@ func readModelBackup(path string) (modelPreferenceBackup, error) {
 		// Earlier snapshots owned cloud preferences. Restore those old writes
 		// during migration, but never capture them in a new local-only session.
 		allowedPaths, requiredPaths = legacyModelPreferencePaths(true), legacyModelPreferencePaths(false)
+	} else if bk.Version == 2 {
+		allowedPaths, requiredPaths = modelPreferencePathsV2(), modelPreferencePathsV2()
 	}
 	allowed, required, parents := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, path := range allowedPaths {
@@ -263,6 +269,19 @@ func forceModelSelectionAt(dbPath, backupPath, byokHexID string, knownAdapterIDs
 	if err != nil {
 		return err
 	}
+	if d["useOpenAIKey"] != true {
+		// Do not reactivate a key the user disabled in Cursor. The current
+		// client hydrates secret storage after reading the legacy key, so
+		// either nonempty record must be treated as an existing credential.
+		// Presence is enough; decrypting it is unnecessary.
+		var existing int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM ItemTable WHERE key IN (?, ?) AND length(value) > 0", "cursorAuth/openAIKey", "secret://cursorAuth/openAIKey").Scan(&existing); err != nil {
+			return fmt.Errorf("check existing native API key: %w", err)
+		}
+		if existing > 0 {
+			return errors.New("Cursor has a saved but disabled OpenAI API key; remove that unused key in Cursor Settings before starting BYOK so it is not reactivated")
+		}
+	}
 	// The old release had no cloud preference backup to restore. Remove only
 	// its recognizable local-ID triple before capturing today's local fields.
 	clearLegacyCloudModelPin(d, knownAdapterIDs)
@@ -270,15 +289,28 @@ func forceModelSelectionAt(dbPath, backupPath, byokHexID string, knownAdapterIDs
 	if err != nil {
 		return err
 	}
-	if _, err := readModelBackup(backupPath); errors.Is(err, os.ErrNotExist) {
+	if previous, err := readModelBackup(backupPath); errors.Is(err, os.ErrNotExist) {
 		if err := writeStateBackup(backupPath, snapshot); err != nil {
 			return err
 		}
 	} else if err != nil {
 		return err
+	} else if previous.Version < 3 {
+		return errors.New("restore the previous Cursor model backup before enabling BYOK model selection")
 	}
 	rewriteAiSettings(d, byokHexID)
 	rewriteFeatureModelConfigs(d, byokHexID)
+	// Cursor's native picker recognizes its own-key mode independently of
+	// account membership. Our configured provider supplies that inference;
+	// no native API key, account token, or subscription value is changed.
+	// Restore the original value (including absence) with the model snapshot.
+	d["useOpenAIKey"] = true
+	// Cursor merges incoming catalog display objects. A prior native catalog's
+	// lockedSelection can survive a later catalog refresh. Clear only these
+	// backed-up catalog caches
+	// before the client loads the local catalog; preserve genuine account data.
+	delete(d, "modelPickerDisplayConfiguration")
+	delete(d, "lockedModelPickerSelection")
 	if err := writeApplicationUser(tx, d); err != nil {
 		return err
 	}

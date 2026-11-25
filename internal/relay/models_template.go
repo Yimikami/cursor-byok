@@ -21,6 +21,11 @@ func buildGetDefaultModelResponse(adapters []AdapterInfo) []byte {
 	return appendString(out, 4, "0")
 }
 
+func appendMessage(dst []byte, field protowire.Number, body []byte) []byte {
+	dst = protowire.AppendTag(dst, field, protowire.BytesType)
+	return protowire.AppendBytes(dst, body)
+}
+
 // The shipped schema defines field 1 as nudge_date and repeated field 3 as
 // models_with_no_default_switch. Disable scheduled model nudges and preserve
 // every configured BYOK choice, not just the highest-priority adapter.
@@ -90,6 +95,16 @@ func buildAvailableModelsResponse(adapters []AdapterInfo) []byte {
 	buf = appendFeatureCfg(buf, 8, hexID, false, false)
 	buf = appendFeatureCfg(buf, 9, hexID, false, false)
 	buf = appendFeatureCfg(buf, 10, hexID, false, false)
+	// Cursor 3.32 separates routed models (Auto) from named models. Our
+	// locally configured adapters belong in the native named-model list.
+	// Mirror its private-inference display configuration: hide routed view
+	// and omit the button back to it, while retaining native search/selection.
+	// AvailableModelsResponse.display_configuration = field 15;
+	// routed_model_view_config.hide_routed_model_view = fields 1 / 5;
+	// named_models_view_config.named_view_to_routed_model_view_no_button = 2 / 3.
+	display := appendMessage(nil, 1, appendBool(nil, 5, true))
+	display = appendMessage(display, 2, appendMessage(nil, 3, nil))
+	buf = appendMessage(buf, 15, display)
 
 	// Fields 12 (= 2400000) and 13 (= 2). Unknown semantics but the working
 	// app emits these every time. Replicating them keeps Cursor's picker
