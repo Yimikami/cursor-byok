@@ -189,11 +189,17 @@ func TestInstalledTabTextConsumer(t *testing.T) {
 	const script = `
 const fs=require('node:fs'),vm=require('node:vm');
 const src=fs.readFileSync(process.env.CURSOR_BYOK_WORKBENCH_ARTIFACT,'utf8');
-const a=src.indexOf('function XMw('),b=src.indexOf('Qo(),Ky()',a);
-if(a<0||b<0||b-a>12000)throw new Error('Tab reader moved');
+// Keep extraction bounded to inspected pure helper blocks. Minified names
+// changed between Cursor 3.31.15 and 3.32.4; never load the application module.
+const blocks=[
+  {start:'function XMw(',end:'Qo(),Ky()',reader:'ZMw'},
+  {start:'function w1f(',end:'Er(),xm()',reader:'I1f'},
+];
+const block=blocks.map(x=>{const a=src.indexOf(x.start),b=a<0?-1:src.indexOf(x.end,a);return {...x,a,b};}).find(x=>x.a>=0&&x.b>x.a&&x.b-x.a<=12000);
+if(!block)throw new Error('Tab reader moved: inspect the new pure helper block');
 const context=vm.createContext({});
-vm.runInContext(src.slice(a,b),context,{timeout:1000});
-const test="(async()=>{const stream={async *[Symbol.asyncIterator](){yield {case:'text',text:'  x = 42  '}}};const result=await ZMw(stream[Symbol.asyncIterator](),'  x = ',0);if(result[0]!=='  x = 42  ')throw new Error('replacement lost');let rejected=false;try{await ZMw((async function*(){yield {case:'doneEdit'}})(),'x',0)}catch{rejected=true}if(!rejected)throw new Error('negative edit marker accepted')})()";
+vm.runInContext(src.slice(block.a,block.b)+';globalThis.__tabReader='+block.reader,context,{timeout:1000});
+const test="(async()=>{const stream={async *[Symbol.asyncIterator](){yield {case:'text',text:'  x = 42  '}}};const result=await __tabReader(stream[Symbol.asyncIterator](),'  x = ',0);if(result[0]!=='  x = 42  ')throw new Error('replacement lost');let rejected=false;try{await __tabReader((async function*(){yield {case:'doneEdit'}})(),'x',0)}catch{rejected=true}if(!rejected)throw new Error('negative edit marker accepted')})()";
 vm.runInContext(test,context,{timeout:1000}).then(()=>process.stdout.write('installed Tab reader passed'),err=>{process.stderr.write(String(err));process.exitCode=1});
 `
 	command := exec.Command(node, "-e", script)
