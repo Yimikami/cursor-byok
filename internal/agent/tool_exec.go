@@ -1,19 +1,18 @@
 package agent
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	agentv1 "cursor-byok/internal/protocodec/gen/agent/v1"
 	aiserverv1 "cursor-byok/internal/protocodec/gen/aiserver/v1"
 
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -21,20 +20,6 @@ import (
 // ("Shell" -> "shell") for exec_id composition.
 func execToolName(openAIName string) string {
 	return strings.ToLower(openAIName)
-}
-
-// pendingResult is the channel a RunSSE goroutine blocks on while waiting
-// for Cursor's IDE to execute a tool and BidiAppend the result back. We
-// key by tool_call_id so concurrent tool calls within the same turn each
-// get their own waiter.
-type pendingResult struct {
-	ch chan *toolResultEnvelope
-}
-
-type toolWaitKey struct{ owner, id string }
-type sequenceWaitKey struct {
-	owner string
-	id    uint32
 }
 
 // toolResultEnvelope bundles what BidiAppend hands us when Cursor finishes
@@ -49,78 +34,6 @@ type toolResultEnvelope struct {
 	Error      string
 }
 
-var (
-	pendingMu sync.Mutex
-	pending   = map[toolWaitKey]*pendingResult{}
-	// execIDAlias maps Cursor's generated exec_id ("exec-shell-<nanos>")
-	// back to the OpenAI tool_call_id we registered the waiter under.
-	// Cursor's BidiAppend reply carries the exec_id, not the tool_call_id.
-	execIDAlias = map[toolWaitKey]string{}
-	// seqAlias maps ExecServerMessage.Id (numeric sequence we emit) to the
-	// OpenAI tool_call_id. Cursor correlates by this numeric id on every
-	// BidiAppend frame in its streaming reply.
-	seqAlias = map[sequenceWaitKey]string{}
-	// shellAccum tracks per-seq stdout/stderr/exit as ShellStream events
-	// arrive across many BidiAppend frames. Finalised on Exit.
-	shellAccum = map[sequenceWaitKey]*shellAccumState{}
-	// pendingInteraction holds channels for in-flight InteractionQuery
-	// responses, keyed by the InteractionQuery.id we assigned when emitting
-	// the frame. Cursor's BidiAppend delivers AgentClientMessage_InteractionResponse
-	// once the user accepts/rejects the UI prompt (e.g. the "Switch to X?"
-	// dialog), and we forward that verdict back to the model.
-	pendingInteraction = map[sequenceWaitKey]chan *agentv1.InteractionResponse{}
-)
-
-func registerInteractionWait(owner string, id uint32) chan *agentv1.InteractionResponse {
-	ch := make(chan *agentv1.InteractionResponse, 1)
-	pendingMu.Lock()
-	pendingInteraction[sequenceWaitKey{owner, id}] = ch
-	pendingMu.Unlock()
-	return ch
-}
-
-func deliverInteractionResponse(owner string, resp *agentv1.InteractionResponse) {
-	if resp == nil {
-		return
-	}
-	id := sequenceWaitKey{owner, resp.GetId()}
-	pendingMu.Lock()
-	ch := pendingInteraction[id]
-	delete(pendingInteraction, id)
-	pendingMu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- resp:
-		default:
-		}
-	}
-}
-
-// waitForInteractionResponse blocks until Cursor's IDE delivers the user's
-// verdict on the InteractionQuery we emitted (approve / reject), or the
-// timeout elapses. Returns nil on timeout.
-func waitForInteractionResponse(ctx context.Context, ch <-chan *agentv1.InteractionResponse, timeout time.Duration) *agentv1.InteractionResponse {
-	defer func() {
-		pendingMu.Lock()
-		defer pendingMu.Unlock()
-		for id, waiting := range pendingInteraction {
-			if waiting == ch {
-				delete(pendingInteraction, id)
-			}
-		}
-	}()
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return nil
-	case r := <-ch:
-		return r
-	case <-timer.C:
-		return nil
-	}
-}
-
 type shellAccumState struct {
 	Stdout   []byte
 	Stderr   []byte
@@ -128,60 +41,6 @@ type shellAccumState struct {
 	Exited   bool
 	ExitCode uint32
 	Cwd      string
-}
-
-// registerExecIDAlias remembers that a future BidiAppend with execID
-// (string) OR seq (numeric ExecServerMessage.Id we emitted) should be
-// routed to the waiter registered against toolCallID.
-func registerExecIDAlias(owner, execID string, seq uint32, toolCallID string) {
-	pendingMu.Lock()
-	execIDAlias[toolWaitKey{owner, execID}] = toolCallID
-	seqAlias[sequenceWaitKey{owner, seq}] = toolCallID
-	pendingMu.Unlock()
-}
-
-func registerToolWait(owner, toolCallID string) chan *toolResultEnvelope {
-	ch := make(chan *toolResultEnvelope, 1)
-	pendingMu.Lock()
-	pending[toolWaitKey{owner, toolCallID}] = &pendingResult{ch: ch}
-	pendingMu.Unlock()
-	return ch
-}
-
-// removeToolWaitLocked releases all routes and shell buffers together, whether
-// a waiter completed, timed out, or was canceled. Caller holds pendingMu.
-func removeToolWaitLocked(key toolWaitKey) *pendingResult {
-	pr := pending[key]
-	delete(pending, key)
-	for exec, target := range execIDAlias {
-		if exec.owner == key.owner && target == key.id {
-			delete(execIDAlias, exec)
-		}
-	}
-	for seq, target := range seqAlias {
-		if seq.owner == key.owner && target == key.id {
-			delete(seqAlias, seq)
-			delete(shellAccum, seq)
-		}
-	}
-	return pr
-}
-
-func deliverToolResult(owner, id string, env *toolResultEnvelope) {
-	pendingMu.Lock()
-	// Accept either the OpenAI tool_call_id or Cursor's exec_id alias.
-	key := toolWaitKey{owner, id}
-	if pending[key] == nil {
-		key.id = execIDAlias[key]
-	}
-	pr := removeToolWaitLocked(key)
-	pendingMu.Unlock()
-	if pr != nil {
-		select {
-		case pr.ch <- env:
-		default:
-		}
-	}
 }
 
 // handleLocalTool resolves tool calls that don't need to round-trip through
@@ -196,6 +55,9 @@ func deliverToolResult(owner, id string, env *toolResultEnvelope) {
 // mode-selector picker. SwitchMode needs this; the pill alone doesn't flip
 // the selector.
 func handleLocalTool(sess *Session, pc PendingToolCall) (result string, pillProto *agentv1.ToolCall, interaction *agentv1.InteractionQuery, handled bool) {
+	if err := toolModeError(sess, pc); err != "" {
+		return `{"error":` + jsonString(err) + `}`, nil, nil, true
+	}
 	switch pc.Name {
 	case "SwitchMode":
 		var a struct {
@@ -217,9 +79,6 @@ func handleLocalTool(sess *Session, pc PendingToolCall) (result string, pillProt
 			target = agentv1.AgentMode_AGENT_MODE_DEBUG
 		default:
 			return `{"error":"unknown target_mode_id (expected: agent, ask, plan, debug)"}`, nil, nil, true
-		}
-		if sess != nil {
-			sess.Mode = target
 		}
 		// Cursor's UI picker keys options by an internal id that doesn't
 		// always match the enum name — confirmed by grepping Cursor's
@@ -257,7 +116,7 @@ func handleLocalTool(sess *Session, pc PendingToolCall) (result string, pillProt
 				},
 			},
 		}
-		return fmt.Sprintf(`{"result":"ok","mode":%q,"note":"Mode switched. Continue the task in the new mode without re-asking the user."}`, a.TargetModeId), pill, iq, true
+		return fmt.Sprintf(`{"result":"pending","mode":%q,"note":"Waiting for Cursor to approve the mode switch."}`, a.TargetModeId), pill, iq, true
 	case "CreatePlan":
 		var a struct {
 			Name     string   `json:"name"`
@@ -513,6 +372,12 @@ func jsonStringEscapeRaw(s string) string {
 // the caller should skip exec and feed the error back via the tool-role
 // message (used by StrReplace when read-modify-write fails locally).
 func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, string) {
+	if err := toolModeError(sess, pc); err != "" {
+		return nil, err
+	}
+	if err := validateExecToolArguments(pc); err != "" {
+		return nil, err
+	}
 	// Re-route synthesized per-MCP-tool functions (mcp_<idx>__<slug>) back
 	// into a proper CallMcpTool with the real server identifier. The model
 	// sees each MCP tool as its own OpenAI function, which kills the "let
@@ -569,11 +434,27 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
 			return nil, "parse CallMcpTool args: " + err.Error()
 		}
+		if a.Server == "" || a.ToolName == "" {
+			return nil, "CallMcpTool: server and toolName are required"
+		}
+		serverID := a.Server
+		if sess != nil {
+			for _, ref := range sess.McpMap {
+				if ref.ToolName == a.ToolName && (ref.ServerName == a.Server || ref.ServerID == a.Server) {
+					serverID = ref.ServerID
+					break
+				}
+			}
+		}
+		qualifiedName := a.ToolName
+		if !strings.HasPrefix(qualifiedName, serverID+"-") {
+			qualifiedName = serverID + "-" + qualifiedName
+		}
 		mcpArgs := &agentv1.McpArgs{
-			Name:               a.Server,
+			Name:               qualifiedName,
 			ToolName:           a.ToolName,
 			ToolCallId:         pc.ID,
-			ProviderIdentifier: a.Server,
+			ProviderIdentifier: serverID,
 		}
 		if len(a.Arguments) > 0 {
 			mcpArgs.Args = make(map[string]*structpb.Value)
@@ -618,7 +499,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 		var a struct {
 			Server string `json:"server"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, fmt.Sprintf("parse %s args: %v", pc.Name, err)
+		}
 		args := &agentv1.ListMcpResourcesExecArgs{}
 		if a.Server != "" {
 			args.Server = &a.Server
@@ -646,6 +529,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 		}
 		if a.Path == "" {
 			return nil, "StrReplace: path is required"
+		}
+		if a.OldString == "" {
+			return nil, "StrReplace: old_string must not be empty"
 		}
 		raw, err := os.ReadFile(a.Path)
 		if err != nil {
@@ -700,13 +586,21 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 		var a struct {
 			Command          string `json:"command"`
 			WorkingDirectory string `json:"working_directory"`
-			BlockUntilMs     int32  `json:"block_until_ms"`
+			BlockUntilMs     *int32 `json:"block_until_ms"`
 			Description      string `json:"description"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
-		timeoutMs := a.BlockUntilMs
-		if timeoutMs == 0 {
-			timeoutMs = 5000
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, "parse Shell args: " + err.Error()
+		}
+		if a.Command == "" {
+			return nil, "Shell: command is required"
+		}
+		timeoutMs := int32(30000)
+		if a.BlockUntilMs != nil {
+			timeoutMs = *a.BlockUntilMs
+			if timeoutMs < 0 {
+				return nil, "Shell: block_until_ms must not be negative"
+			}
 		}
 		fileOutputThreshold := uint64(40000)
 		hardTimeout := int32(86400000)
@@ -725,7 +619,6 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 							},
 						},
 						FileOutputThresholdBytes: &fileOutputThreshold,
-						SkipApproval:             true,
 						TimeoutBehavior:          agentv1.TimeoutBehavior_TIMEOUT_BEHAVIOR_BACKGROUND,
 						HardTimeout:              &hardTimeout,
 					},
@@ -739,7 +632,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 			Limit              *int32 `json:"limit,omitempty"`
 			IncludeLineNumbers *bool  `json:"include_line_numbers,omitempty"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, fmt.Sprintf("parse %s args: %v", pc.Name, err)
+		}
 		return &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_ReadToolCall{
 				ReadToolCall: &agentv1.ReadToolCall{
@@ -763,7 +658,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 			Contents string `json:"contents"`
 			Content  string `json:"content"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, fmt.Sprintf("parse %s args: %v", pc.Name, err)
+		}
 		body := a.Contents
 		if body == "" {
 			body = a.Content
@@ -782,7 +679,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 		var a struct {
 			Path string `json:"path"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, fmt.Sprintf("parse %s args: %v", pc.Name, err)
+		}
 		return &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_DeleteToolCall{
 				DeleteToolCall: &agentv1.DeleteToolCall{
@@ -798,7 +697,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 			GlobPattern     string  `json:"glob_pattern"`
 			TargetDirectory *string `json:"target_directory,omitempty"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, fmt.Sprintf("parse %s args: %v", pc.Name, err)
+		}
 		return &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_GlobToolCall{
 				GlobToolCall: &agentv1.GlobToolCall{
@@ -823,7 +724,9 @@ func buildToolCallProto(sess *Session, pc PendingToolCall) (*agentv1.ToolCall, s
 			HeadLimit       *int32  `json:"head_limit,omitempty"`
 			Multiline       *bool   `json:"multiline,omitempty"`
 		}
-		_ = json.Unmarshal([]byte(pc.Arguments), &a)
+		if err := json.Unmarshal([]byte(pc.Arguments), &a); err != nil {
+			return nil, fmt.Sprintf("parse %s args: %v", pc.Name, err)
+		}
 		return &agentv1.ToolCall{
 			Tool: &agentv1.ToolCall_GrepToolCall{
 				GrepToolCall: &agentv1.GrepToolCall{
@@ -967,28 +870,39 @@ func newExecID(tool string) string {
 // for shells we accumulate until the Exit event lands and only then
 // deliver a composite result. Non-shell results (Write, Read, Ls, Grep,
 // Delete) arrive as one complete message, so we deliver them immediately.
-func routeExecClientResult(owner string, acm *agentv1.AgentClientMessage) {
+func routeExecClientResult(scope toolWaitScope, acm *agentv1.AgentClientMessage) {
 	ecm := acm.GetExecClientMessage()
 	if ecm == nil {
 		return
 	}
-	seq := sequenceWaitKey{owner, ecm.GetId()}
 	pendingMu.Lock()
-	callID := seqAlias[seq]
-	// Late shell events must not recreate an accumulator after the associated
-	// waiter has completed or timed out. Owner is checked before any mutation.
+	var update *aiserverv1.InteractionUpdate
+	var backgroundComposerID string
+	defer func() {
+		pendingMu.Unlock()
+		if update != nil {
+			publishInteractionUpdate(backgroundComposerID, update)
+		}
+	}()
+	key, ok := pendingKeyLocked(scope, ecm.GetExecId(), ecm.GetId())
+	if !ok {
+		// Timed-out/cancelled executions cannot recreate accumulators, publish
+		// stray output, or consume a different tool's result.
+		return
+	}
+	backgroundComposerID = pending[key].backgroundComposerID
+	seq := sequenceWaitKey{scope, ecm.GetId()}
 	if ss := ecm.GetShellStream(); ss != nil {
-		key := toolWaitKey{owner, callID}
-		if callID == "" || pending[key] == nil {
-			pendingMu.Unlock()
+		if target, exists := seqAlias[seq]; !exists || target != key {
 			return
 		}
+		// Accumulation and retirement share the same lock. Once detached on
+		// Exit, the delivered state (including its slices) stays immutable.
 		state := shellAccum[seq]
 		if state == nil {
 			state = &shellAccumState{}
 			shellAccum[seq] = state
 		}
-		var update *aiserverv1.InteractionUpdate
 		switch evt := ss.GetEvent().(type) {
 		case *agentv1.ShellStream_Start:
 			state.Started = true
@@ -1001,60 +915,29 @@ func routeExecClientResult(owner string, acm *agentv1.AgentClientMessage) {
 			update = &aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Stderr{Stderr: &aiserverv1.ShellStreamStderr{Data: evt.Stderr.GetData()}}}}}
 		case *agentv1.ShellStream_Exit:
 			state.Exited = true
-			state.ExitCode, state.Cwd = evt.Exit.GetCode(), evt.Exit.GetCwd()
+			state.ExitCode = evt.Exit.GetCode()
+			state.Cwd = evt.Exit.GetCwd()
 			update = &aiserverv1.InteractionUpdate{Message: &aiserverv1.InteractionUpdate_ShellOutputDelta{ShellOutputDelta: &aiserverv1.ShellOutputDeltaUpdate{Event: &aiserverv1.ShellOutputDeltaUpdate_Exit{Exit: &aiserverv1.ShellStreamExit{Code: evt.Exit.GetCode(), Cwd: evt.Exit.GetCwd()}}}}}
+		case *agentv1.ShellStream_Rejected, *agentv1.ShellStream_PermissionDenied, *agentv1.ShellStream_Backgrounded:
+			// These are terminal acknowledgments too: there is no later Exit
+			// after a refusal, and a background command finishes independently.
+			body, _ := json.Marshal(ecm)
+			completePendingLocked(key, &toolResultEnvelope{ResultJSON: string(body), ExecClient: ecm})
+			return
 		}
-		var pr *pendingResult
-		var env *toolResultEnvelope
 		if state.Exited {
-			body, _ := json.Marshal(map[string]any{"exit_code": state.ExitCode, "cwd": state.Cwd, "stdout": string(state.Stdout), "stderr": string(state.Stderr)})
-			finalState := *state
-			env = &toolResultEnvelope{ResultJSON: string(body), ShellAccum: &finalState}
-			pr = removeToolWaitLocked(key)
-		}
-		pendingMu.Unlock()
-		if update != nil {
-			publishInteractionUpdate(update)
-		}
-		if pr != nil {
-			select {
-			case pr.ch <- env:
-			default:
-			}
+			body, _ := json.Marshal(map[string]any{
+				"exit_code": state.ExitCode, "cwd": state.Cwd,
+				"stdout": string(state.Stdout), "stderr": string(state.Stderr),
+			})
+			delete(shellAccum, seq)
+			completePendingLocked(key, &toolResultEnvelope{ResultJSON: string(body), ShellAccum: state, ExecClient: ecm})
 		}
 		return
 	}
-	pendingMu.Unlock()
 	body, err := json.Marshal(ecm)
-	if err != nil {
-		return
-	}
-	env := &toolResultEnvelope{ResultJSON: string(body), ExecClient: ecm}
-	if id := ecm.GetExecId(); id != "" {
-		deliverToolResult(owner, id, env)
-		return
-	}
-	if callID != "" {
-		deliverToolResult(owner, callID, env)
-		return
-	}
-	// Older clients omit both identifiers. Keep the compatibility fallback
-	// confined to one owner's sole outstanding waiter.
-	if ecm.GetId() != 0 {
-		return
-	}
-	pendingMu.Lock()
-	var only string
-	count := 0
-	for key := range pending {
-		if key.owner == owner {
-			only = key.id
-			count++
-		}
-	}
-	pendingMu.Unlock()
-	if count == 1 {
-		deliverToolResult(owner, only, env)
+	if err == nil {
+		completePendingLocked(key, &toolResultEnvelope{ResultJSON: string(body), ExecClient: ecm})
 	}
 }
 
@@ -1099,12 +982,45 @@ func attachToolResultToProto(tc *agentv1.ToolCall, toolName string, env *toolRes
 
 func attachShellResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 	shell := tc.GetShellToolCall()
-	if shell == nil || env.ShellAccum == nil {
+	if shell == nil {
+		return
+	}
+	if result := env.ExecClient.GetShellResult(); result != nil {
+		shell.Result = result
+		return
+	}
+	if stream := env.ExecClient.GetShellStream(); stream != nil {
+		switch event := stream.GetEvent().(type) {
+		case *agentv1.ShellStream_Rejected:
+			shell.Result = &agentv1.ShellResult{Result: &agentv1.ShellResult_Rejected{Rejected: event.Rejected}}
+			return
+		case *agentv1.ShellStream_PermissionDenied:
+			shell.Result = &agentv1.ShellResult{Result: &agentv1.ShellResult_PermissionDenied{PermissionDenied: event.PermissionDenied}}
+			return
+		case *agentv1.ShellStream_Backgrounded:
+			background := true
+			shell.Result = &agentv1.ShellResult{IsBackground: &background, Pid: event.Backgrounded.Pid}
+			return
+		}
+	}
+	if env.ShellAccum == nil {
 		return
 	}
 	cmd := ""
 	if shell.Args != nil {
 		cmd = shell.Args.GetCommand()
+	}
+	exit := env.ExecClient.GetShellStream().GetExit()
+	if env.ShellAccum.ExitCode != 0 || exit.GetAborted() {
+		shell.Result = &agentv1.ShellResult{Result: &agentv1.ShellResult_Failure{Failure: &agentv1.ShellFailure{
+			Command: cmd, WorkingDirectory: env.ShellAccum.Cwd,
+			ExitCode: int32(env.ShellAccum.ExitCode), Stdout: string(env.ShellAccum.Stdout), Stderr: string(env.ShellAccum.Stderr),
+			Aborted: exit.GetAborted(),
+		}}}
+		if exit != nil {
+			shell.Result.GetFailure().AbortReason = exit.AbortReason
+		}
+		return
 	}
 	shell.Result = &agentv1.ShellResult{
 		Result: &agentv1.ShellResult_Success{
@@ -1141,15 +1057,13 @@ func attachWriteResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 				afterContent = *edit.Args.StreamContent
 			}
 		}
-		linesAdded := int32(0)
-		for _, ch := range afterContent {
-			if ch == '\n' {
-				linesAdded++
-			}
+		if v.Success.GetPath() != "" {
+			path = v.Success.GetPath()
 		}
-		if afterContent != "" {
-			linesAdded++
+		if v.Success.FileContentAfterWrite != nil {
+			afterContent = v.Success.GetFileContentAfterWrite()
 		}
+		linesAdded := v.Success.GetLinesCreated()
 		er.Result = &agentv1.EditResult_Success{
 			Success: &agentv1.EditSuccess{
 				Path:                 path,
@@ -1157,7 +1071,6 @@ func attachWriteResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 				AfterFullFileContent: afterContent,
 			},
 		}
-		_ = v
 	case *agentv1.WriteResult_PermissionDenied:
 		er.Result = &agentv1.EditResult_WritePermissionDenied{
 			WritePermissionDenied: &agentv1.EditWritePermissionDenied{
@@ -1196,20 +1109,27 @@ func attachReadResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 	switch v := rr.GetResult().(type) {
 	case *agentv1.ReadResult_Success:
 		rtr.Result = &agentv1.ReadToolResult_Success{
-			Success: &agentv1.ReadToolSuccess{
-				Path:       v.Success.GetPath(),
-				TotalLines: uint32(v.Success.GetTotalLines()),
-				Output:     &agentv1.ReadToolSuccess_Content{Content: v.Success.GetContent()},
-			},
+			Success: selectReadOutput(read.Args, v.Success),
 		}
 	case *agentv1.ReadResult_Error:
 		rtr.Result = &agentv1.ReadToolResult_Error{
 			Error: &agentv1.ReadToolError{ErrorMessage: v.Error.GetError()},
 		}
+	case *agentv1.ReadResult_Rejected:
+		rtr.Result = &agentv1.ReadToolResult_Error{Error: &agentv1.ReadToolError{ErrorMessage: "Read rejected: " + v.Rejected.GetReason()}}
+	case *agentv1.ReadResult_PermissionDenied:
+		rtr.Result = &agentv1.ReadToolResult_Error{Error: &agentv1.ReadToolError{ErrorMessage: "Permission denied: " + v.PermissionDenied.GetPath()}}
+	case *agentv1.ReadResult_FileNotFound:
+		rtr.Result = &agentv1.ReadToolResult_Error{Error: &agentv1.ReadToolError{ErrorMessage: "File not found: " + v.FileNotFound.GetPath()}}
+	case *agentv1.ReadResult_InvalidFile:
+		rtr.Result = &agentv1.ReadToolResult_Error{Error: &agentv1.ReadToolError{ErrorMessage: "Invalid file: " + v.InvalidFile.GetReason()}}
 	default:
 		return
 	}
 	read.Result = rtr
+	if body, err := protojson.Marshal(rtr); err == nil {
+		env.ResultJSON = string(body)
+	}
 }
 
 func attachGlobResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
@@ -1250,6 +1170,11 @@ func attachGlobResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 			},
 		}
 	}
+	if glob.Result != nil {
+		if body, err := protojson.Marshal(glob.Result); err == nil {
+			env.ResultJSON = string(body)
+		}
+	}
 }
 
 // collectGlobMatches walks the Ls directory tree Cursor returned and yields
@@ -1261,6 +1186,10 @@ func collectGlobMatches(root *agentv1.LsDirectoryTreeNode, rootPath, pattern str
 		return nil
 	}
 	re := globToRegex(pattern)
+	rootPath = strings.TrimRight(strings.ReplaceAll(rootPath, "\\", "/"), "/")
+	if rootPath == "" || rootPath == "." {
+		rootPath = strings.TrimRight(strings.ReplaceAll(root.GetAbsPath(), "\\", "/"), "/")
+	}
 	var out []string
 	var walk func(n *agentv1.LsDirectoryTreeNode)
 	walk = func(n *agentv1.LsDirectoryTreeNode) {
@@ -1274,13 +1203,9 @@ func collectGlobMatches(root *agentv1.LsDirectoryTreeNode, rootPath, pattern str
 				full += "/"
 			}
 			full += f.GetName()
-			rel := full
-			if rootPath != "" && rootPath != "." && strings.HasPrefix(rel, rootPath) {
-				rel = strings.TrimPrefix(rel, rootPath)
-				rel = strings.TrimPrefix(rel, "/")
-				rel = strings.TrimPrefix(rel, "\\")
-			}
-			if re == nil || re.MatchString(rel) || re.MatchString(full) {
+			rel := strings.ReplaceAll(full, "\\", "/")
+			rel = strings.TrimPrefix(rel, rootPath+"/")
+			if re == nil || re.MatchString(rel) {
 				out = append(out, full)
 			}
 		}
@@ -1304,13 +1229,21 @@ func globToRegex(pattern string) *regexp.Regexp {
 	b.WriteString("^")
 	// Normalise backslashes to forward so the same regex works for both.
 	p := strings.ReplaceAll(pattern, "\\", "/")
+	if !strings.HasPrefix(p, "**/") {
+		p = "**/" + p
+	}
 	for i := 0; i < len(p); i++ {
 		c := p[i]
 		switch c {
 		case '*':
 			if i+1 < len(p) && p[i+1] == '*' {
-				b.WriteString(".*")
-				i++
+				if i+2 < len(p) && p[i+2] == '/' {
+					b.WriteString("(?:.*/)?")
+					i += 2
+				} else {
+					b.WriteString(".*")
+					i++
+				}
 			} else {
 				b.WriteString("[^/]*")
 			}
@@ -1359,6 +1292,12 @@ func attachMcpResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 			mcp.Result.Result = &agentv1.McpToolResult_Error{
 				Error: &agentv1.McpToolError{Error: v.Error.GetError()},
 			}
+		case *agentv1.McpResult_Rejected:
+			mcp.Result.Result = &agentv1.McpToolResult_Rejected{Rejected: v.Rejected}
+		case *agentv1.McpResult_PermissionDenied:
+			mcp.Result.Result = &agentv1.McpToolResult_PermissionDenied{PermissionDenied: v.PermissionDenied}
+		case *agentv1.McpResult_ToolNotFound:
+			mcp.Result.Result = &agentv1.McpToolResult_Error{Error: &agentv1.McpToolError{Error: "MCP tool not found: " + v.ToolNotFound.GetName()}}
 		}
 	}
 }
@@ -1390,37 +1329,5 @@ func attachDeleteResult(tc *agentv1.ToolCall, env *toolResultEnvelope) {
 	}
 	if r := env.ExecClient.GetDeleteResult(); r != nil {
 		del.Result = r
-	}
-}
-
-// waitForToolResult blocks until Cursor posts a matching tool_call_id
-// result via BidiAppend (see bidi.go -> HandleBidiAppend). Returns a
-// timeout envelope after 2 minutes so a stuck IDE doesn't hang the server
-// goroutine forever.
-func waitForToolResult(ch chan *toolResultEnvelope, timeout time.Duration) *toolResultEnvelope {
-	return waitForToolResultContext(context.Background(), ch, timeout)
-}
-
-func waitForToolResultContext(ctx context.Context, ch chan *toolResultEnvelope, timeout time.Duration) *toolResultEnvelope {
-	defer releaseToolWait(ch)
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return &toolResultEnvelope{Error: ctx.Err().Error()}
-	case env := <-ch:
-		return env
-	case <-timer.C:
-		return &toolResultEnvelope{Error: "tool execution timed out after " + timeout.String()}
-	}
-}
-
-func releaseToolWait(ch chan *toolResultEnvelope) {
-	pendingMu.Lock()
-	defer pendingMu.Unlock()
-	for id, waiting := range pending {
-		if waiting.ch == ch {
-			removeToolWaitLocked(id)
-		}
 	}
 }

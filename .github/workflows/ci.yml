@@ -61,6 +61,10 @@ jobs:
       - name: go test
         run: go test ./...
 
+      - name: Race-check concurrent agent and proxy sessions
+        if: matrix.os == 'ubuntu-22.04'
+        run: go test -race ./internal/agent ./internal/mitm
+
       - name: go build
         run: go build ./...
 

@@ -1,55 +1,143 @@
-# Windows connection validation
+# Windows and native Cursor validation
 
-The connection fixes have automated tests with temporary certificates, simulated
-registry failures, and a loopback TLS/WebSocket provider. A Windows cross-build
-does not verify the actual Windows trust store, OS proxy notifications, or
-Cursor UI. Run these checks on the Windows device before treating that path as
-fully verified.
+Updated: 2026-11-26. Windows Cursor 3.31.15; initial repository baseline
+`519591e23ae2c75eef4312ae574e67a987eecb87`.
 
-## Record the environment
+## Verified on the Windows host
 
-- Windows version and architecture, Cursor version, cursor-byok commit/build.
-- Whether a VPN or another proxy is normally enabled.
-- Whether ordinary HTTPS browsing works before starting cursor-byok.
+- Frontend production build, Go tests, vet and Windows production compilation.
+- 35 checks in an isolated Cursor profile using the real CurrentUser Root
+  certificate store and WinINET proxy configuration: reject untrusted CA,
+  missing adapter and occupied port without changing proxy state; start/stop;
+  restore exact registry values and original Cursor settings/auth; recover a
+  deliberately interrupted session and consume its recovery files.
+- Public HTTPS during the proxy session retained genuine upstream certificates
+  and valid TLS. Cursor's synthetic model endpoint used the expected local CA.
+- Temporary certificate from the isolated-profile lifecycle test was removed.
+- The actual Cursor model picker displayed the configured model-a adapter.
+- Real Cursor traffic reproduced a fatal nil-URL panic in the CONNECT request
+  hook. HTTP/2 `PRI *` and `OPTIONS *` can reach that hook with no URL after
+  goproxy's URL reconstruction fails. The new wire-level regression reproduces
+  both and verifies a subsequent HTTPS request still succeeds. With the fix,
+  real Cursor traffic no longer killed the listener in the observed session.
 
-Keep API keys, auth tokens and conversation contents out of shared logs.
+## Live provider checks
 
-## First connection
+The explicitly configured Provider A model-a provider passed
+`TestLiveProviderNativeProtocol` on this host, repeated on the combined source
+on 2026-11-26 (38.73 seconds total):
 
-1. Close Cursor completely and run the updated cursor-byok under the same
-   Windows account. Keep its existing configuration and backup files.
-2. Add/select the intended adapter and run its provider test. A successful
-   provider test verifies only the provider connection.
-3. Select **Install CA**. The status must reflect the active certificate's
-   fingerprint, not merely another root named `cursor-byok Local CA`.
-4. Select **Start service**. It must either report Running or display an
-   actionable error; check ordinary HTTPS browsing in either case.
-5. Open Cursor and select the configured model. Send a short Ask message and
-   confirm the answer finishes. Then use a scratch folder containing a harmless
-   text file to check an Agent read-file tool call.
-6. Cancel a response, then send another message. Both should complete without
-   a repeating `/agent/v1/run` 404 or a permanently busy chat.
-7. Fully quit Cursor, then select **Stop**. Verify ordinary browsing and reopen
-   Cursor to confirm the original account and model selection are available again.
+| Check | Result | Evidence boundary |
+| --- | --- | --- |
+| Streaming inference probe | Passed, 5.64 s | Real provider; same streaming transport as the agent |
+| Commit generation | Passed, 12.99 s | Real provider through TLS proxy and native protobuf RPC; SCM button not covered |
+| WebSocket Read roundtrip | Passed, 20.00 s | Real provider, TLS CONNECT, WebSocket v1, native Read messages and returned file token; executor was a bounded test fixture |
 
-## Failure recovery
+A separate run using the dashboard's current basic probe options (512 output
+tokens, no forced reasoning option) also passed in 18.06 seconds. Full Go tests,
+vet, frontend production build and Windows production compilation passed on the
+combined source. Tests using an explicit fixture authorizer do not establish
+desktop acceptance of the production account guard.
 
-- Without the active CA trusted, Start must fail before changing the system
-  proxy. Install CA and retry.
-- If port 18080 is already occupied, Start must report that problem and leave
-  the OS proxy unchanged.
-- If restoration fails, the application must remain available and show the
-  error. Resolve the reported problem and use **Stop and restore settings**;
-  the same recovery can be retried after reopening the application.
-- Check tray Quit and native Quit after a normal Start: original proxy settings
-  should be restored. Forced termination is different: recovery happens on the
-  next launch.
+These tests are opt-in with `CURSOR_BYOK_LIVE_CONFIG` and spend provider tokens.
+They read credentials from the supplied local config, use temporary client-side
+CA trust, and do not change the OS proxy or the installed Cursor account.
+Never commit a provider config, API key, auth database, or unredacted capture.
 
-If an older build has already left a dead manual proxy, inspect Windows proxy
-settings. Only disable the stale `127.0.0.1:18080` entry when cursor-byok is no
-longer running; preserve unrelated VPN/corporate settings and recovery files.
+## Real UI finding and current work
 
-Model-picker preferences have their own scoped recovery record,
-`cursor-model-backup.json`; unrelated preferences must survive restoration.
-Cursor 3.26.16, originally reported in issue #12, needs its own desktop check;
-the implemented WebSocket contract was inspected in Cursor 3.32.4.
+The Cursor Agents UI initially failed a harmless Read request four times with a
+server error. Its network and agent-host logs identify an automatically updated
+managed harness (`5b1496a9b2a2`) running the local agent loop. It calls
+`/aiserver.v1.InferenceService/RunInferenceSSE`; the older implementation returned
+404. Passing the legacy AgentService WebSocket test therefore did not establish
+current native UI compatibility.
+
+The local-loop inference protocol is implemented from installed wire
+declarations, including the required prompt/model/mode metadata. In that path
+Cursor owns tool execution, permissions, skill loading, mode handling and local
+task scheduling; BYOK supplies model inference. Tests execute the installed
+client's extracted pure metadata guards in an isolated VM and cover TLS framing,
+binary/hex Bidi input, tools, history, cancellation and signed reasoning replay.
+
+In a separate Cursor user-data directory, the real UI completed a file search
+and Read of a temporary marker file and returned the expected contents. The
+configured local skill's response marker was also observed. Native MCP discovery
+then failed on an upstream metadata 404. A tool call also outlived the old
+30-second bridge timeout while still waiting for native approval. Both causes
+have code fixes and regression coverage, but Windows desktop acceptance remains
+pending. This is not an all-features certificate.
+
+The live run also exposed Cursor's new safeStorage token migration: comparing
+only plaintext would discard an auth backup after Cursor encrypted the injected
+token. Windows ownership checks now decrypt the envelope in memory using the
+existing profile key and DPAPI with UI forbidden. Original backup values retain
+their original representation. Unreadable/unsupported envelopes keep the backup
+and return an error. The real installed token format was verified read-only;
+fixture tests cover encrypted restoration, a later legitimate login and bad tags.
+Non-Windows encrypted ownership currently fails closed and retains recovery data.
+
+The first Windows live test did lose its original auth recovery record before
+that guard existed. The temporary test identity remained; the saved baseline
+contains hashes only and does not restore credentials. Original sign-in recovery
+is still pending. The identified temporary fields were subsequently removed by
+the new ownership-checked migration. The real login page opened, but the native
+browser automation connection failed twice after a runtime reset. No successful
+sign-in was observed. Settings match the pre-test baseline, SQLite quick-check is
+OK, and the original disabled system-proxy state is restored.
+Removing the separate live-test CA trust required an interactive Windows root
+store security confirmation. The command was canceled without changing trust;
+that certificate remains installed. The isolated lifecycle fixture's certificate
+was removed as noted above. No proxy listener or live-test helper remains active.
+This incident must not be described as a successful real-account
+restore. The 35 isolated lifecycle checks above used disposable fixture data.
+
+The combined macOS/Windows implementation preserves genuine account identity
+instead of injecting a temporary account into new sessions. Model-picker
+preferences have a separate profile-scoped recovery record; unrelated and
+cloud-agent preferences must survive restoration. See
+[native-feature-validation.md](native-feature-validation.md) for independent
+macOS desktop evidence. The older Cursor 3.26.16 reported in issue #12 still
+requires a version-specific desktop check.
+
+An isolated Git workspace contains a read-only JSON-RPC MCP fixture, one skill,
+a marker file and a small debugging fixture. These are local test inputs, not
+production user projects. No external MCP account or service was changed.
+
+## Regression coverage added
+
+- All ten legacy native execution tools: Shell, Read, Write, Delete, StrReplace,
+  Glob, Grep, CallMcpTool, FetchMcpResource and ListMcpResources, including their
+  request wire fields and completion/result delivery. Dynamic MCP preserves
+  schemas and server routing.
+- Four modes at the provider boundary; native StartPlan/ExecutePlan actions;
+  skills/debug metadata; mode switch approval/rejection/timeout behavior.
+- Cross-conversation/transport result isolation, late shell chunks, cancellation
+  and concurrent retirement. Linux CI additionally runs the race detector;
+  Windows race execution requires an unavailable C compiler on this host.
+- JSONC comments/BOM/line endings and unrelated edits; atomic auth changes;
+  stale backup safety; startup rollback ordering.
+- OpenAI reasoning and Anthropic signed/redacted reasoning across native tool
+  turns; consecutive tool results precede their image attachments.
+- Native NameTab and WriteGitBranchName generation through TLS and a streaming
+  provider fixture, including rejection of invalid/empty branch output.
+- Shutdown closes speculative TCP and hijacked CONNECT sockets, cancels active
+  provider requests and releases the listener even after a graceful deadline.
+- Native Tab model list/config and single-line prediction protocol; see
+  [native-tab-protocol.md](native-tab-protocol.md) for the latency boundary.
+- macOS stable service identity resolution for rename/deletion, plus a read-only
+  framework inventory test for macOS CI. Actual Mac proxy mutation is not
+  established by Windows cross-compilation.
+
+See [native-feature-inventory.md](native-feature-inventory.md) for the bounded
+feature inventory, installed-artifact evidence and remaining unsupported RPCs.
+
+## Acceptance still required
+
+After normal Cursor sign-in and a working desktop automation connection, repeat
+the local MCP tool/resource and explicit skill command, then Ask, Plan/Create and
+Build, Debug/reproduction, simultaneous conversations and Multitask. Exercise the
+SCM generation button, Tab, inline edit, the remaining native tools, and hosted
+services separately. Mock transport coverage and the independent macOS MCP/skill
+results do not substitute for these Windows desktop checks. The latest combined
+account-authentication and transport guards also need a real desktop retest.

@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	inferencev1 "cursor-byok/internal/protocodec/gen/inference/v1"
 	"github.com/coder/websocket"
 	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 func inferenceBytes(b []byte, field protowire.Number) ([]byte, error) {
@@ -68,57 +70,21 @@ func (w *inferenceWriter) send(kind protowire.Number, payload []byte) error {
 }
 
 func inferenceRunReady(requested []byte, target AdapterTarget) []byte {
-	// No compression, delta, speculation or resumption capabilities are
-	// advertised: the client sends complete, uncompressed invocation requests.
-	id := target.StableID
-	if id == "" {
-		id = target.Model
-	}
-	resolved := wireBytes(nil, 1, []byte(id))
-	_ = wireFields(requested, func(n protowire.Number, typ protowire.Type, data []byte, value uint64) error {
-		if n == 2 && typ == protowire.VarintType {
-			resolved = wireUint(resolved, n, value)
-		}
-		if n == 3 && typ == protowire.BytesType {
-			resolved = wireBytes(resolved, n, data)
-		}
-		return nil
-	})
-	vendor := "openai"
-	if target.ProviderType == "anthropic" {
-		vendor = "anthropic"
-	}
-	metadata := wireBytes(wireBytes(nil, 1, []byte(vendor)), 2, []byte("latest"))
-	metadata = wireUint(metadata, 32, 128000)
-	if target.DisplayName != "" {
-		metadata = wireBytes(metadata, 44, []byte(target.DisplayName))
-	}
-	metadata = inferenceModeMetadata(metadata)
-	ready := wireBytes(wireBytes(nil, 1, resolved), 4, metadata)
-	ready = wireUint(ready, 7, 1)  // accepts_client_heartbeat
-	ready = wireUint(ready, 13, 1) // accepts_aborted_finish
-	return ready
+	model := &inferencev1.InferenceRequestedModel{}
+	_ = proto.Unmarshal(requested, model)
+	ready := &inferencev1.RunInferenceRunReady{ResolvedModel: resolvedInferenceModel(target, model), PromptModelMetadata: localInferencePromptMetadata(), AcceptsClientHeartbeat: true, AcceptsAbortedFinish: true, AcceptsSubagentModelResolution: true}
+	body, _ := proto.Marshal(ready)
+	return body
 }
 
-// Cursor 3.32.4 refuses non-Agent local-loop turns unless RunReady explicitly
-// supplies their mode decisions. These are prompt/tool-discovery settings;
-// Cursor still enforces each mode's tool restrictions and execution approvals.
-// ASK's wire identifier is "chat", not "ask" (shipped agent-host mode parser).
-func inferenceModeMetadata(metadata []byte) []byte {
-	modes := []string{"agent", "chat", "plan", "debug", "triage", "multitask"}
-	for _, mode := range modes {
-		row := wireUint(wireBytes(nil, 1, []byte(mode)), 2, 1)
-		var targets []byte
-		for _, target := range modes {
-			if target != mode {
-				targets = wireBytes(targets, 1, []byte(target))
-			}
-		}
-		row = wireBytes(row, 3, targets)
-		metadata = wireBytes(metadata, 46, row)
+type inferenceSessionSink struct{ writer *inferenceWriter }
+
+func (sink inferenceSessionSink) response(id string, response *inferencev1.InferenceStreamResponse) error {
+	body, err := proto.Marshal(&inferencev1.RunInferenceInvocationResponse{InvocationId: id, Response: response})
+	if err != nil {
+		return err
 	}
-	metadata = wireUint(metadata, 47, 1) // use_new_plan_mode_prompts
-	return wireBytes(metadata, 48, wireBytes(nil, 1, []byte("AskQuestion")))
+	return sink.writer.send(3, body)
 }
 
 func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter io.Writer, resolve AdapterResolver) error {
@@ -137,7 +103,9 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 	var workers sync.WaitGroup
 	defer func() { cancel(); workers.Wait() }()
 	var target AdapterTarget
+	var runModel *inferencev1.InferenceRequestedModel
 	ready := false
+	var clientSeqAcked uint64
 	for {
 		if messages == nil && len(active) == 0 {
 			return nil
@@ -147,14 +115,13 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 			return ctx.Err()
 		case <-ticker.C:
 			if ready {
-				if err := w.send(1, nil); err != nil {
+				if err := w.send(1, wireUint(nil, 3, clientSeqAcked)); err != nil {
 					return err
 				}
 			}
 		case result := <-done:
-			// Free the slot before publishing completion. Terminal writes belong
-			// to this loop, so a blocked reader also stops new admissions instead
-			// of accumulating an unbounded number of end-frame writers.
+			// Publish terminal frames in the admission loop: a slow reader must
+			// backpressure new work instead of accumulating end-frame writers.
 			delete(active, result.id)
 			if err := w.send(4, result.end); err != nil {
 				return err
@@ -164,14 +131,20 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 				if !ready {
 					return errors.New("inference input ended before run request")
 				}
-				// HalfClose ends only client input. Keep the response side and
-				// provider contexts alive until all accepted invocations finish.
+				// Half-close ends client input, not accepted provider invocations.
 				messages = nil
 				continue
 			}
 			kind, payload, err := inferenceVariant(b)
 			if err != nil {
 				return err
+			}
+			native := &inferencev1.RunInferenceClientMessage{}
+			if err := proto.Unmarshal(b, native); err != nil {
+				return err
+			}
+			if native.GetAppendSeq() > clientSeqAcked {
+				clientSeqAcked = native.GetAppendSeq()
 			}
 			switch kind {
 			case 1: // RunInferenceRunRequest
@@ -194,6 +167,10 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 				target, found = ResolveAdapterForModel(adapters, string(id))
 				if !found {
 					return errors.New("no provider is configured")
+				}
+				runModel = &inferencev1.InferenceRequestedModel{}
+				if err := proto.Unmarshal(requested, runModel); err != nil {
+					return err
 				}
 				if err := w.send(2, inferenceRunReady(requested, target)); err != nil {
 					return err
@@ -232,9 +209,11 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 				go func(target AdapterTarget) {
 					defer workers.Done()
 					defer cancelInvocation()
-					err := runInferenceProvider(invocationCtx, request, target, func(response []byte) error {
-						return w.send(3, wireBytes(wireBytes(nil, 1, id), 2, response))
-					})
+					invocation := &inferencev1.RunInferenceInvokeModel{}
+					err := proto.Unmarshal(payload, invocation)
+					if err == nil {
+						err = runLocalInferenceInvocation(invocationCtx, invocation, target, runModel, resolve, inferenceSessionSink{writer: w})
+					}
 					end := wireBytes(nil, 1, id)
 					if err != nil {
 						code := uint64(13)
@@ -258,6 +237,34 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 				}
 			case 4: // finish_run
 				return nil
+			case 9:
+				request := &inferencev1.RunInferenceResolveSubagentModels{}
+				if err := proto.Unmarshal(payload, request); err != nil {
+					return err
+				}
+				response := &inferencev1.RunInferenceSubagentModelsResolved{ResolutionId: request.GetResolutionId()}
+				for _, name := range request.GetRequestedModels() {
+					var adapters []AdapterTarget
+					if resolve != nil {
+						adapters = resolve()
+					}
+					adapter, ok := ResolveAdapterForModel(adapters, name)
+					entry := &inferencev1.RunInferenceResolvedSubagentModel{Requested: name, Policy: &inferencev1.RunInferenceSubagentModelPolicy{Valid: ok, Blocked: !ok}}
+					if ok {
+						slug := resolvedInferenceModel(adapter, nil).GetModelId()
+						entry.ResolvedSlug = &slug
+						entry.Policy.Slug = slug
+						entry.Policy.Advertised = true
+					}
+					response.Models = append(response.Models, entry)
+				}
+				body, err := proto.Marshal(response)
+				if err != nil {
+					return err
+				}
+				if err = w.send(5, body); err != nil {
+					return err
+				}
 			case 5, 6, 7, 10: // heartbeats and optional telemetry
 				if !ready {
 					return errors.New("inference message before run request")

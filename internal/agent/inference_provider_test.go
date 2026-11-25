@@ -210,7 +210,7 @@ func TestInferenceProviderRejectsStreamingErrorsAndInterruptedResponse(t *testin
 		{"capacity", "data: {\"error\":{\"code\":\"capacity_unavailable\",\"message\":\"retry later\"}}\n\ndata: [DONE]\n\n", "capacity_unavailable"},
 		{"truncated", "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n", "before a completion marker"},
 		{"empty", "data: [DONE]\n\n", "without text or tool calls"},
-		{"reasoning-only", "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"unfinished analysis\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n", "without text or tool calls"},
+		{"reasoning-only", "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"unfinished analysis\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n", "output token limit"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

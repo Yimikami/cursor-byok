@@ -155,6 +155,7 @@ func HandleBackgroundComposerAttach(ctx context.Context, reqBody []byte, content
 			break
 		}
 		assistant := openAIMessage{Role: "assistant"}
+		preserveProviderReasoning(&assistant, res)
 		for _, tc := range res.ToolCalls {
 			assistant.ToolCalls = append(assistant.ToolCalls, openAIToolCallMsg{ID: tc.ID, Type: "function", Function: openAIToolCallFn{Name: tc.Name, Arguments: tc.Arguments}})
 			streamed, err := buildBackgroundComposerStreamedToolCall(sess, tc)
@@ -164,7 +165,7 @@ func HandleBackgroundComposerAttach(ctx context.Context, reqBody []byte, content
 		}
 		messages = append(messages, assistant)
 		for _, tc := range res.ToolCalls {
-			resultJSON, finalResult := executeBackgroundComposerTool(w, sess, tc)
+			resultJSON, finalResult := executeBackgroundComposerTool(ctx, w, sess, tc)
 			messages = append(messages, toolResultMessage(tc.ID, tc.Name, resultJSON))
 			_ = appendAndWriteBackgroundComposerUpdate(w, st, &aiserverv1.AttachBackgroundComposerResponse{HeadlessAgenticComposerResponse: &aiserverv1.HeadlessAgenticComposerResponse{FinalToolResult: &aiserverv1.HeadlessAgenticComposerResponse_FinalToolResult{ToolCallId: tc.ID, Result: finalResult}, IsMessageDone: false}, StatusUpdate: st.Status})
 		}
@@ -180,11 +181,12 @@ func HandleBackgroundComposerInteractionUpdates(ctx context.Context, reqBody []b
 	w := &lockedWriter{w: rawWriter}
 	req := &aiserverv1.StreamInteractionUpdatesRequest{}
 	if err := decodeUnary(reqBody, contentType, req); err != nil {
-		_ = writeEndStream(w)
+		writeEndStreamError(w, "decode background interaction request: "+err.Error())
 		return
 	}
-	_ = req
-	_ = WriteBackgroundComposerInteractionStubStream(ctx, w)
+	if err := WriteBackgroundComposerInteractionStream(ctx, w, req.GetBcId()); err != nil {
+		writeEndStreamError(w, err.Error())
+	}
 }
 
 func backgroundComposerPromptText(prompt *aiserverv1.HeadlessAgenticComposerPrompt) string {
@@ -222,9 +224,12 @@ func writeBackgroundComposerResponse(w io.Writer, resp *aiserverv1.AttachBackgro
 	return nil
 }
 
-func WriteBackgroundComposerInteractionStubStream(ctx context.Context, w io.Writer) error {
+func WriteBackgroundComposerInteractionStream(ctx context.Context, w io.Writer, backgroundComposerID string) error {
 	lw := &lockedWriter{w: w}
-	id, ch := subscribeInteractionUpdates()
+	id, ch, err := subscribeInteractionUpdates(backgroundComposerID)
+	if err != nil {
+		return err
+	}
 	defer unsubscribeInteractionUpdates(id)
 	heartbeat := time.NewTicker(10 * time.Second)
 	defer heartbeat.Stop()
@@ -272,7 +277,7 @@ func buildBackgroundComposerStreamedToolCall(sess *Session, pc PendingToolCall) 
 	return &aiserverv1.StreamedBackToolCall{Tool: v2Tool, ToolCallId: pc.ID, Name: pc.Name, RawArgs: pc.Arguments}, nil
 }
 
-func executeBackgroundComposerTool(w io.Writer, sess *Session, pc PendingToolCall) (string, *aiserverv1.ClientSideToolV2Result) {
+func executeBackgroundComposerTool(ctx context.Context, w io.Writer, sess *Session, pc PendingToolCall) (string, *aiserverv1.ClientSideToolV2Result) {
 	tc, buildErr := buildToolCallProto(sess, pc)
 	v2Tool := mapBackgroundComposerTool(tc)
 	if buildErr != "" {
@@ -284,14 +289,14 @@ func executeBackgroundComposerTool(w io.Writer, sess *Session, pc PendingToolCal
 	}
 	execID := newExecID(execToolName(pc.Name))
 	seq := nextExecSeq()
-	waitCh := registerToolWait(sess.RequestID, pc.ID)
-	defer releaseToolWait(waitCh)
-	registerExecIDAlias(sess.RequestID, execID, seq, pc.ID)
+	waitCh := registerBackgroundToolWait(bidiToolScope(sess.RequestID), pc.ID, sess.RequestID)
+	registerExecIDAlias(bidiToolScope(sess.RequestID), execID, seq, pc.ID)
 	if err := writeExecRequest(w, execID, seq, pc, tc); err != nil {
+		cancelToolWait(waitCh)
 		errMsg := err.Error()
 		return `{"error":` + jsonString(errMsg) + `}`, &aiserverv1.ClientSideToolV2Result{Tool: v2Tool, ToolCallId: pc.ID, Error: &aiserverv1.ToolResultError{ClientVisibleErrorMessage: errMsg, ModelVisibleErrorMessage: errMsg}}
 	}
-	env := waitForToolResult(waitCh, 2*time.Minute)
+	env := waitForNativeToolResult(ctx, waitCh)
 	if env == nil {
 		errMsg := "background composer tool execution returned no result"
 		return `{"error":` + jsonString(errMsg) + `}`, &aiserverv1.ClientSideToolV2Result{Tool: v2Tool, ToolCallId: pc.ID, Error: &aiserverv1.ToolResultError{ClientVisibleErrorMessage: errMsg, ModelVisibleErrorMessage: errMsg}}
@@ -343,13 +348,100 @@ func buildBackgroundComposerFinalResult(tool aiserverv1.ClientSideToolV2, pc Pen
 	raw := env.ResultJSON
 	switch tool {
 	case aiserverv1.ClientSideToolV2_CLIENT_SIDE_TOOL_V2_RUN_TERMINAL_COMMAND_V2:
-		exitCode := int32(0)
-		cwd := ""
-		if env != nil && env.ShellAccum != nil {
-			exitCode = int32(env.ShellAccum.ExitCode)
-			cwd = env.ShellAccum.Cwd
+		terminal := &aiserverv1.RunTerminalCommandV2Result{Output: raw, OutputRaw: raw}
+		fail := func(message string, reason aiserverv1.RunTerminalCommandEndedReason, rejected bool) {
+			res.Error = &aiserverv1.ToolResultError{ClientVisibleErrorMessage: message, ModelVisibleErrorMessage: message}
+			terminal.EndedReason = reason
+			if rejected {
+				terminal.Rejected = &rejected
+			}
 		}
-		res.Result = &aiserverv1.ClientSideToolV2Result_RunTerminalCommandV2Result{RunTerminalCommandV2Result: &aiserverv1.RunTerminalCommandV2Result{Output: raw, OutputRaw: raw, ExitCode: exitCode, ExitCodeV2: &exitCode, ResultingWorkingDirectory: cwd, EndedReason: aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_COMPLETED, NotInterrupted: true}}
+		finish := func(code int32, cwd, stdout, stderr string) {
+			terminal.ExitCode, terminal.ExitCodeV2 = code, &code
+			terminal.ResultingWorkingDirectory = cwd
+			terminal.Output, terminal.OutputRaw = stdout+stderr, stdout+stderr
+			terminal.NotInterrupted = true
+			terminal.EndedReason = aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_COMPLETED
+			if code != 0 {
+				terminal.EndedReason = aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_FAILED
+			}
+		}
+		background := func(cwd string, shellID *uint32) {
+			terminal.ResultingWorkingDirectory = cwd
+			terminal.PoppedOutIntoBackground = true
+			terminal.IsRunningInBackground = true
+			terminal.BackgroundShellId = shellID
+			// Acknowledging a running process is not an exit. Preserve the raw
+			// envelope (including PID, which V2 has no dedicated field for).
+			terminal.Output, terminal.OutputRaw = raw, raw
+			terminal.ExitCodeV2 = nil
+			terminal.NotInterrupted = false
+			terminal.EndedReason = aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_UNSPECIFIED
+		}
+		aborted := func(wasAborted bool, reason agentv1.ShellAbortReason) {
+			if !wasAborted && reason == agentv1.ShellAbortReason_SHELL_ABORT_REASON_UNSPECIFIED {
+				return
+			}
+			terminal.NotInterrupted = false
+			terminal.EndedReason = aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_ABORTED
+			if reason == agentv1.ShellAbortReason_SHELL_ABORT_REASON_TIMEOUT {
+				terminal.EndedReason = aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_IDLE_TIMEOUT
+			}
+		}
+		if state := env.ShellAccum; state != nil {
+			finish(int32(state.ExitCode), state.Cwd, string(state.Stdout), string(state.Stderr))
+			if exit := env.ExecClient.GetShellStream().GetExit(); exit != nil {
+				aborted(exit.GetAborted(), exit.GetAbortReason())
+			}
+		} else if shell := env.ExecClient.GetShellResult(); shell != nil {
+			switch result := shell.GetResult().(type) {
+			case *agentv1.ShellResult_Success:
+				finish(result.Success.GetExitCode(), result.Success.GetWorkingDirectory(), result.Success.GetStdout(), result.Success.GetStderr())
+				if result.Success.InterleavedOutput != nil {
+					terminal.Output, terminal.OutputRaw = result.Success.GetInterleavedOutput(), result.Success.GetInterleavedOutput()
+				}
+				if shell.GetIsBackground() {
+					background(result.Success.GetWorkingDirectory(), result.Success.ShellId)
+				}
+			case *agentv1.ShellResult_Failure:
+				finish(result.Failure.GetExitCode(), result.Failure.GetWorkingDirectory(), result.Failure.GetStdout(), result.Failure.GetStderr())
+				terminal.EndedReason = aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_FAILED
+				terminal.NotInterrupted = result.Failure.GetSignal() == ""
+				if result.Failure.InterleavedOutput != nil {
+					terminal.Output, terminal.OutputRaw = result.Failure.GetInterleavedOutput(), result.Failure.GetInterleavedOutput()
+				}
+				aborted(result.Failure.GetAborted(), result.Failure.GetAbortReason())
+			case *agentv1.ShellResult_Rejected:
+				fail("Shell rejected: "+result.Rejected.GetReason(), aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_ABORTED, true)
+			case *agentv1.ShellResult_PermissionDenied:
+				fail("Shell permission denied: "+result.PermissionDenied.GetError(), aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_FAILED, false)
+			case *agentv1.ShellResult_SpawnError:
+				fail("Shell could not start: "+result.SpawnError.GetError(), aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_FAILED, false)
+			case *agentv1.ShellResult_Timeout:
+				fail(fmt.Sprintf("Shell timed out after %d ms", result.Timeout.GetTimeoutMs()), aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_IDLE_TIMEOUT, false)
+			default:
+				if shell.GetIsBackground() {
+					background("", nil)
+				} else {
+					fail("Shell returned no terminal outcome", aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_UNSPECIFIED, false)
+				}
+			}
+		} else if stream := env.ExecClient.GetShellStream(); stream != nil {
+			switch event := stream.GetEvent().(type) {
+			case *agentv1.ShellStream_Rejected:
+				fail("Shell rejected: "+event.Rejected.GetReason(), aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_ABORTED, true)
+			case *agentv1.ShellStream_PermissionDenied:
+				fail("Shell permission denied: "+event.PermissionDenied.GetError(), aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_EXECUTION_FAILED, false)
+			case *agentv1.ShellStream_Backgrounded:
+				shellID := event.Backgrounded.GetShellId()
+				background(event.Backgrounded.GetWorkingDirectory(), &shellID)
+			default:
+				fail("Shell returned no terminal outcome", aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_UNSPECIFIED, false)
+			}
+		} else {
+			fail("Shell returned no terminal outcome", aiserverv1.RunTerminalCommandEndedReason_RUN_TERMINAL_COMMAND_ENDED_REASON_UNSPECIFIED, false)
+		}
+		res.Result = &aiserverv1.ClientSideToolV2Result_RunTerminalCommandV2Result{RunTerminalCommandV2Result: terminal}
 	case aiserverv1.ClientSideToolV2_CLIENT_SIDE_TOOL_V2_READ_FILE_V2:
 		lineCount := int32(strings.Count(raw, "\n") + 1)
 		chars := int32(len(raw))

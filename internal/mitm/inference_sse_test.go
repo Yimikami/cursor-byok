@@ -109,8 +109,8 @@ func TestInferenceSSEBuffersAndOrdersAppendBeforeAttach(t *testing.T) {
 	defer cancel()
 	owner := newSSETestOwner("inference-sse-order")
 	// Current Cursor pipelines independent POSTs and may retry a seqno.
-	sseAppend(t, ctx, client, owner, 1, inferenceInvoke("invoke-sse", "SSE prompt"), true)
-	sseAppend(t, ctx, client, owner, 1, inferenceInvoke("invoke-sse", "SSE prompt"), true)
+	sseAppend(t, ctx, client, owner, 1, inferenceWebSocketInvoke("invoke-sse", "SSE prompt"), true)
+	sseAppend(t, ctx, client, owner, 1, inferenceWebSocketInvoke("invoke-sse", "SSE prompt"), true)
 	sseAppend(t, ctx, client, owner, 0, inferenceSSEStart(), false)
 	resp := ssePost(t, ctx, client, inferenceSSEPath, wsBytes(1, []byte(owner)))
 	defer resp.Body.Close()
@@ -234,7 +234,7 @@ func TestInferenceSSECancellation(t *testing.T) {
 			if b, end := sseFrame(t, resp.Body); end || wsField(t, b, 2) == nil {
 				t.Fatal("missing ready")
 			}
-			sseAppend(t, ctx, client, owner, 1, inferenceInvoke("cancel-sse", "cancel"), true)
+			sseAppend(t, ctx, client, owner, 1, inferenceWebSocketInvoke("cancel-sse", "cancel"), true)
 			select {
 			case <-requested:
 			case <-ctx.Done():
@@ -294,7 +294,7 @@ func TestInferenceSSEReportsProtocolAndProviderErrors(t *testing.T) {
 			}
 			sseAppend(t, ctx, client, owner, 0, payload, true)
 			if kind == "upstream" {
-				sseAppend(t, ctx, client, owner, 1, inferenceInvoke("bad-provider", "prompt"), false)
+				sseAppend(t, ctx, client, owner, 1, inferenceWebSocketInvoke("bad-provider", "prompt"), false)
 			}
 			resp := ssePost(t, ctx, client, inferenceSSEPath, wsBytes(1, []byte(owner)))
 			defer resp.Body.Close()

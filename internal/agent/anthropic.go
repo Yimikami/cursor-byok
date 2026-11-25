@@ -57,13 +57,16 @@ var (
 // `max_tokens` is REQUIRED by Anthropic — missing / 0 returns 400. We
 // default to a conservative 8192 when the user didn't pick a value.
 type anthropicRequest struct {
-	Model     string             `json:"model"`
-	MaxTokens int                `json:"max_tokens"`
-	System    string             `json:"system,omitempty"`
-	Messages  []anthropicMessage `json:"messages"`
-	Tools     []anthropicTool    `json:"tools,omitempty"`
-	Stream    bool               `json:"stream"`
-	Thinking  *anthropicThinking `json:"thinking,omitempty"`
+	Model       string             `json:"model"`
+	MaxTokens   int                `json:"max_tokens"`
+	System      string             `json:"system,omitempty"`
+	Messages    []anthropicMessage `json:"messages"`
+	Tools       []anthropicTool    `json:"tools,omitempty"`
+	Stream      bool               `json:"stream"`
+	Thinking    *anthropicThinking `json:"thinking,omitempty"`
+	Temperature *float32           `json:"temperature,omitempty"`
+	TopP        *float32           `json:"top_p,omitempty"`
+	Stop        []string           `json:"stop_sequences,omitempty"`
 }
 
 type anthropicThinking struct {
@@ -72,20 +75,8 @@ type anthropicThinking struct {
 }
 
 type anthropicMessage struct {
-	Role          string                  `json:"role"` // "user" | "assistant"
-	Content       []anthropicContentBlock `json:"content"`
-	NativeContent json.RawMessage         `json:"-"`
-}
-
-func (m anthropicMessage) MarshalJSON() ([]byte, error) {
-	if len(m.NativeContent) > 0 {
-		return json.Marshal(struct {
-			Role    string          `json:"role"`
-			Content json.RawMessage `json:"content"`
-		}{m.Role, m.NativeContent})
-	}
-	type plain anthropicMessage
-	return json.Marshal(plain(m))
+	Role    string                  `json:"role"` // "user" | "assistant"
+	Content []anthropicContentBlock `json:"content"`
 }
 
 // anthropicContentBlock is the union of every content block variant we
@@ -93,7 +84,8 @@ func (m anthropicMessage) MarshalJSON() ([]byte, error) {
 // omitempty keeps marshalling simple; the Type field tells the reader
 // which subset of fields is populated.
 type anthropicContentBlock struct {
-	Type string `json:"type"`
+	Type string          `json:"type"`
+	Raw  json.RawMessage `json:"-"`
 
 	// text
 	Text string `json:"text,omitempty"`
@@ -111,11 +103,25 @@ type anthropicContentBlock struct {
 	// image
 	Source *anthropicImageSource `json:"source,omitempty"`
 
-	// Signed thinking and opaque redacted thinking are preserved for replay
-	// alongside tool results in the next Messages API invocation.
+	// Extended thinking must be replayed unchanged with its signature.
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`
 	Data      string `json:"data,omitempty"`
+}
+
+func (block anthropicContentBlock) MarshalJSON() ([]byte, error) {
+	if len(block.Raw) > 0 {
+		return block.Raw, nil
+	}
+	if block.Type == "thinking" {
+		return json.Marshal(struct {
+			Type      string `json:"type"`
+			Thinking  string `json:"thinking"`
+			Signature string `json:"signature"`
+		}{block.Type, block.Thinking, block.Signature})
+	}
+	type plain anthropicContentBlock
+	return json.Marshal(plain(block))
 }
 
 type anthropicImageSource struct {
@@ -169,6 +175,7 @@ type anthropicStreamDelta struct {
 }
 
 type anthropicContentBlockInit struct {
+	Raw       json.RawMessage `json:"-"`
 	Type      string          `json:"type"` // "text" | "tool_use" | "thinking"
 	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name,omitempty"`
@@ -176,15 +183,15 @@ type anthropicContentBlockInit struct {
 	Text      string          `json:"text,omitempty"`
 	Thinking  string          `json:"thinking,omitempty"`
 	Signature string          `json:"signature,omitempty"`
-	Raw       json.RawMessage `json:"-"`
+	Data      string          `json:"data,omitempty"`
 }
 
-func (b *anthropicContentBlockInit) UnmarshalJSON(raw []byte) error {
+func (block *anthropicContentBlockInit) UnmarshalJSON(raw []byte) error {
 	type plain anthropicContentBlockInit
-	if err := json.Unmarshal(raw, (*plain)(b)); err != nil {
+	if err := json.Unmarshal(raw, (*plain)(block)); err != nil {
 		return err
 	}
-	b.Raw = append(json.RawMessage(nil), raw...)
+	block.Raw = append(block.Raw[:0], raw...)
 	return nil
 }
 
@@ -244,14 +251,33 @@ func convertMessagesToAnthropic(msgs []openAIMessage) (system string, out []anth
 				Content: []anthropicContentBlock{block},
 			})
 		case "assistant":
-			if len(m.AnthropicContent) > 0 {
-				if err := validateAnthropicNativeContent(m.AnthropicContent); err != nil {
+			var blocks []anthropicContentBlock
+			if len(m.AnthropicNativeContent) > 0 {
+				if err := validateAnthropicNativeContent(m.AnthropicNativeContent); err != nil {
 					return "", nil, err
 				}
-				out = append(out, anthropicMessage{Role: "assistant", NativeContent: m.AnthropicContent})
+				var native []json.RawMessage
+				if err := json.Unmarshal(m.AnthropicNativeContent, &native); err != nil || len(native) == 0 {
+					return "", nil, errors.New("invalid native Anthropic assistant content")
+				}
+				for _, raw := range native {
+					var block anthropicContentBlock
+					if err := json.Unmarshal(raw, &block); err != nil || block.Type == "" {
+						return "", nil, errors.New("invalid native Anthropic content block")
+					}
+					block.Raw = raw
+					blocks = append(blocks, block)
+				}
+				out = appendCoalesced(out, anthropicMessage{Role: "assistant", Content: blocks})
 				continue
 			}
-			var blocks []anthropicContentBlock
+			for _, part := range m.ReasoningParts {
+				if part.IsRedacted {
+					blocks = append(blocks, anthropicContentBlock{Type: "redacted_thinking", Data: part.RedactedData})
+				} else if part.Signature != "" {
+					blocks = append(blocks, anthropicContentBlock{Type: "thinking", Thinking: part.Text, Signature: part.Signature})
+				}
+			}
 			if s, ok := decodeAsString(m.Content); ok && strings.TrimSpace(s) != "" {
 				blocks = append(blocks, anthropicContentBlock{
 					Type: "text",
@@ -399,7 +425,7 @@ func decodeAsString(raw json.RawMessage) (string, bool) {
 // sequential tool_result blocks) must be folded into a single user message
 // with all the tool_results as siblings.
 func appendCoalesced(out []anthropicMessage, msg anthropicMessage) []anthropicMessage {
-	if n := len(out); n > 0 && out[n-1].Role == msg.Role && len(out[n-1].NativeContent) == 0 && len(msg.NativeContent) == 0 {
+	if n := len(out); n > 0 && out[n-1].Role == msg.Role {
 		out[n-1].Content = append(out[n-1].Content, msg.Content...)
 		return out
 	}
@@ -487,24 +513,26 @@ func streamAnthropic(
 	}
 
 	req := anthropicRequest{
-		Model:     model,
-		MaxTokens: maxTokens,
-		System:    system,
-		Messages:  convMsgs,
-		Tools:     convertToolsToAnthropic(tools),
-		Stream:    true,
+		Model:       model,
+		MaxTokens:   maxTokens,
+		System:      system,
+		Messages:    convMsgs,
+		Tools:       convertToolsToAnthropic(tools),
+		Stream:      true,
+		Temperature: opts.Temperature,
+		TopP:        opts.TopP,
+		Stop:        opts.StopSequences,
 	}
-	// A per-invocation output cap may be lower than the configured thinking
-	// budget. Anthropic requires at least 1024 thinking tokens, strictly less
-	// than max_tokens; preserve the caller's output cap and disable thinking
-	// when no valid budget fits.
-	thinkingBudget := min(opts.ThinkingBudget, maxTokens-1)
-	if thinkingBudget >= 1024 {
-		req.Thinking = &anthropicThinking{
-			Type:         "enabled",
-			BudgetTokens: thinkingBudget,
-		}
+	// A native invocation may impose a smaller output cap than the saved
+	// adapter. Anthropic requires a budget >=1024 and strictly below max_tokens.
+	budget := opts.ThinkingBudget
+	if budget >= maxTokens {
+		budget = maxTokens - 1
 	}
+	if budget >= 1024 {
+		req.Thinking = &anthropicThinking{Type: "enabled", BudgetTokens: budget}
+	}
+
 	if os.Getenv("DEBUG") == "1" {
 		sys, usr, ast, tol := 0, 0, 0, 0
 		for _, m := range messages {
@@ -562,14 +590,15 @@ func streamAnthropic(
 	// their deltas straight through onDelta; tool_use blocks buffer the
 	// partial_json until the block closes.
 	type contentAcc struct {
-		kind      string // "text" | "tool_use" | "thinking"
-		id        string
-		name      string
-		args      strings.Builder
-		text      strings.Builder
-		thinking  strings.Builder
-		signature strings.Builder
-		raw       map[string]json.RawMessage
+		kind         string // "text" | "tool_use" | "thinking"
+		id           string
+		name         string
+		args         strings.Builder
+		text         strings.Builder
+		thinking     strings.Builder
+		signature    strings.Builder
+		redactedData string
+		raw          map[string]json.RawMessage
 	}
 	blocks := map[int]*contentAcc{}
 
@@ -616,6 +645,7 @@ func streamAnthropic(
 				acc.text.WriteString(ev.Content.Text)
 				acc.thinking.WriteString(ev.Content.Thinking)
 				acc.signature.WriteString(ev.Content.Signature)
+				acc.redactedData = ev.Content.Data
 				_ = json.Unmarshal(ev.Content.Raw, &acc.raw)
 				// Intentionally do NOT seed acc.args from ev.Content.Input:
 				// Anthropic always emits `{}` as a placeholder on tool_use
@@ -626,7 +656,6 @@ func streamAnthropic(
 			blocks[ev.Index] = acc
 			if acc.text.Len() > 0 || acc.thinking.Len() > 0 {
 				if err := onDelta(acc.text.String(), acc.thinking.String(), false); err != nil {
-					result.SSERaw = sseBuf.Bytes()
 					return result, err
 				}
 			}
@@ -706,7 +735,7 @@ func streamAnthropic(
 			indices[j-1], indices[j] = indices[j], indices[j-1]
 		}
 	}
-	var nativeBlocks []json.RawMessage
+	var nativeContent []json.RawMessage
 	for _, idx := range indices {
 		acc := blocks[idx]
 		if acc == nil {
@@ -716,47 +745,46 @@ func streamAnthropic(
 			acc.raw = make(map[string]json.RawMessage)
 		}
 		setString := func(key, value string) { acc.raw[key], _ = json.Marshal(value) }
+		setString("type", acc.kind)
 		switch acc.kind {
+		case "thinking":
+			part := providerReasoningPart{Text: acc.thinking.String(), Signature: acc.signature.String(), ModelName: model}
+			result.ReasoningParts = append(result.ReasoningParts, part)
+			setString("thinking", part.Text)
+			setString("signature", part.Signature)
+		case "redacted_thinking":
+			result.ReasoningParts = append(result.ReasoningParts, providerReasoningPart{IsRedacted: true, RedactedData: acc.redactedData, ModelName: model})
+			setString("data", acc.redactedData)
 		case "text":
 			setString("text", acc.text.String())
-		case "thinking":
-			setString("thinking", acc.thinking.String())
-			setString("signature", acc.signature.String())
-		case "redacted_thinking":
 		case "tool_use":
 			args := strings.TrimSpace(acc.args.String())
 			if args == "" {
 				args = "{}"
 			}
+			setString("id", acc.id)
+			setString("name", acc.name)
 			acc.raw["input"] = json.RawMessage(args)
+			result.ToolCalls = append(result.ToolCalls, PendingToolCall{ID: acc.id, Name: acc.name, Arguments: args})
 		default:
 			return result, fmt.Errorf("unsupported Anthropic content block %q", acc.kind)
 		}
-		encoded, err := json.Marshal(acc.raw)
+		raw, err := json.Marshal(acc.raw)
 		if err != nil {
-			return result, fmt.Errorf("invalid Anthropic content block: %w", err)
+			return result, fmt.Errorf("preserve Anthropic content: %w", err)
 		}
-		nativeBlocks = append(nativeBlocks, encoded)
-		if acc.kind != "tool_use" {
-			continue
-		}
-		args := strings.TrimSpace(acc.args.String())
-		if args == "" {
-			args = "{}"
-		}
-		result.ToolCalls = append(result.ToolCalls, PendingToolCall{
-			ID:        acc.id,
-			Name:      acc.name,
-			Arguments: args,
-		})
+		nativeContent = append(nativeContent, raw)
 	}
+	result.SSERaw = sseBuf.Bytes()
 	if err := validateProviderToolCalls(result.ToolCalls); err != nil {
-		result.SSERaw = sseBuf.Bytes()
 		return result, err
 	}
-	if len(nativeBlocks) > 0 {
-		result.AnthropicContent, _ = json.Marshal(nativeBlocks)
-		if err := validateAnthropicNativeContent(result.AnthropicContent); err != nil {
+	if len(nativeContent) > 0 {
+		result.AnthropicNativeContent, err = json.Marshal(nativeContent)
+		if err != nil {
+			return result, fmt.Errorf("preserve Anthropic content: %w", err)
+		}
+		if err := validateAnthropicNativeContent(result.AnthropicNativeContent); err != nil {
 			return result, err
 		}
 	}
@@ -773,6 +801,9 @@ func streamAnthropic(
 	}
 
 	result.SSERaw = sseBuf.Bytes()
+	if err := validateProviderToolCalls(result.ToolCalls); err != nil {
+		return result, err
+	}
 	return result, onDelta("", "", true)
 }
 

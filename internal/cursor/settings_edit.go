@@ -109,9 +109,40 @@ func editSettings(data []byte, changes map[string]settingsChange) ([]byte, error
 			if err != nil {
 				return nil, err
 			}
-			edits = append(edits, settingsEdit{prop.valueStart, prop.valueEnd, value})
+			start := prop.valueStart
+			if change.raw != "" {
+				plain, _ := stripSettingsComments([]byte(change.raw))
+				originalComments := settingsComments([]byte(change.raw), plain)
+				// Apply preserved comments from inside the replaced value just
+				// before its new scalar. Move that exact prefix back into the raw
+				// restored value instead of duplicating the original comments.
+				if len(originalComments) > 0 && bytes.HasSuffix(data[:start], originalComments) {
+					start -= len(originalComments)
+				}
+			}
+			if start != prop.valueStart || value != string(data[prop.valueStart:prop.valueEnd]) {
+				comments := settingsComments(data[prop.valueStart:prop.valueEnd], doc.uncommented[prop.valueStart:prop.valueEnd])
+				edits = append(edits, settingsEdit{start, prop.valueEnd, string(comments) + value})
+			}
 			lastKept = i
 		} else {
+			memberEnd := prop.valueEnd
+			if prop.comma >= 0 {
+				memberEnd = prop.comma + 1
+			}
+			lineStart := bytes.LastIndexByte(data[:prop.keyStart], '\n') + 1
+			lineEnd := bytes.IndexByte(data[memberEnd:], '\n')
+			if lineEnd >= 0 {
+				lineEnd += memberEnd
+			}
+			if lineEnd >= 0 && len(bytes.TrimSpace(data[lineStart:prop.keyStart])) == 0 &&
+				len(bytes.TrimSpace(data[memberEnd:lineEnd])) == 0 &&
+				bytes.Equal(data[prop.keyStart:memberEnd], doc.uncommented[prop.keyStart:memberEnd]) {
+				// Remove inserted property lines completely so Start/Stop does
+				// not accumulate blank lines. Commented lines retain their trivia.
+				edits = append(edits, settingsEdit{lineStart, lineEnd + 1, ""})
+				continue
+			}
 			// Preserve trivia even when a user added comments to an injected key.
 			// Comment bytes are whitespace in uncommented, while token bytes are not.
 			var trivia []byte
@@ -227,4 +258,39 @@ func (d *settingsDocument) rawValues(keys map[string]settingsChange) (map[string
 		out[prop.key] = string(d.data[prop.valueStart:prop.valueEnd])
 	}
 	return out, nil
+}
+
+func settingsComments(original, stripped []byte) []byte {
+	var comments []byte
+	for i := 0; i+1 < len(original); i++ {
+		if original[i] != '/' || stripped[i] != ' ' || stripped[i+1] != ' ' {
+			continue
+		}
+		start := i
+		switch original[i+1] {
+		case '/':
+			for i < len(original) && original[i] != '\n' && original[i] != '\r' {
+				i++
+			}
+			if i+1 < len(original) && original[i] == '\r' && original[i+1] == '\n' {
+				i++
+			}
+			if i < len(original) {
+				i++
+			}
+			comments = append(comments, original[start:i]...)
+		case '*':
+			i += 2
+			for i+1 < len(original) && !(original[i] == '*' && original[i+1] == '/') {
+				i++
+			}
+			i += 2
+			comments = append(comments, original[start:i]...)
+			comments = append(comments, ' ')
+		default:
+			continue
+		}
+		i--
+	}
+	return comments
 }

@@ -7140,6 +7140,7 @@ type DebugModeConfig struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	LogPath        string                 `protobuf:"bytes,1,opt,name=log_path,json=logPath,proto3" json:"log_path,omitempty"`
 	ServerEndpoint string                 `protobuf:"bytes,2,opt,name=server_endpoint,json=serverEndpoint,proto3" json:"server_endpoint,omitempty"`
+	SessionId      string                 `protobuf:"bytes,3,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -7184,6 +7185,13 @@ func (x *DebugModeConfig) GetLogPath() string {
 func (x *DebugModeConfig) GetServerEndpoint() string {
 	if x != nil {
 		return x.ServerEndpoint
+	}
+	return ""
+}
+
+func (x *DebugModeConfig) GetSessionId() string {
+	if x != nil {
+		return x.SessionId
 	}
 	return ""
 }
@@ -40072,10 +40080,12 @@ const file_agent_v1_proto_rawDesc = "" +
 	"\x05tools\x18\x04 \x03(\tR\x05tools\x12\x14\n" +
 	"\x05model\x18\x05 \x01(\tR\x05model\x12\x16\n" +
 	"\x06prompt\x18\x06 \x01(\tR\x06prompt\x12O\n" +
-	"\x0fpermission_mode\x18\a \x01(\x0e2&.agent.v1.CustomSubagentPermissionModeR\x0epermissionMode\"U\n" +
+	"\x0fpermission_mode\x18\a \x01(\x0e2&.agent.v1.CustomSubagentPermissionModeR\x0epermissionMode\"t\n" +
 	"\x0fDebugModeConfig\x12\x19\n" +
 	"\blog_path\x18\x01 \x01(\tR\alogPath\x12'\n" +
-	"\x0fserver_endpoint\x18\x02 \x01(\tR\x0eserverEndpoint\"B\n" +
+	"\x0fserver_endpoint\x18\x02 \x01(\tR\x0eserverEndpoint\x12\x1d\n" +
+	"\n" +
+	"session_id\x18\x03 \x01(\tR\tsessionId\"B\n" +
 	"\n" +
 	"DeleteArgs\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12 \n" +

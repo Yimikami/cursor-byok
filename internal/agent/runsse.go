@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	agentv1 "cursor-byok/internal/protocodec/gen/agent/v1"
 	aiserverv1 "cursor-byok/internal/protocodec/gen/aiserver/v1"
 	"cursor-byok/internal/relay"
 
@@ -81,6 +80,9 @@ type AdapterOpts struct {
 	ServiceTier     string
 	MaxOutputTokens int
 	ThinkingBudget  int
+	Temperature     *float32
+	TopP            *float32
+	StopSequences   []string
 }
 
 func AdapterTargetFromRelay(a relay.AdapterInfo) AdapterTarget {
@@ -199,6 +201,10 @@ func HandleRunSSE(
 
 // runAgentSession is shared by the legacy HTTP transport and WebSocket v1.
 func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWriter io.Writer, resolve AdapterResolver) {
+	runAgentSessionWithScope(ctx, requestID, sess, rawWriter, resolve, bidiToolScope(requestID))
+}
+
+func runAgentSessionWithScope(ctx context.Context, requestID string, sess *Session, rawWriter io.Writer, resolve AdapterResolver, scope toolWaitScope) {
 	w := &lockedWriter{w: rawWriter}
 	// Periodic keepalive — Cursor closes the SSE pipe after ~60-90s of
 	// write-side silence, and long OpenAI generations (especially with
@@ -342,7 +348,7 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 		// Record this round's assistant message (including any tool_calls)
 		// in the running message list so the next round sees the context.
 		assistantMsg := textMessage("assistant", roundBuf.String())
-		assistantMsg.AnthropicContent = result.AnthropicContent
+		preserveProviderReasoning(&assistantMsg, result)
 		if len(result.ToolCalls) > 0 {
 			for _, tc := range result.ToolCalls {
 				assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, openAIToolCallMsg{
@@ -396,25 +402,12 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 				// Without this the model says "switched to X mode" before
 				// the user has even clicked Approve.
 				if interaction != nil && pc.Name == "SwitchMode" {
-					waitCh := registerInteractionWait(requestID, interaction.GetId())
+					waitCh := registerInteractionWait(scope, interaction.GetId())
 					_ = writeInteractionQuery(w, interaction)
-					verdict := waitForInteractionResponse(ctx, waitCh, 45*time.Second)
-					switch {
-					case verdict == nil:
-						localResult = `{"result":"timeout","note":"User did not respond to the mode switch dialog within 45 seconds. The IDE may not require approval — continue the task."}`
-					default:
-						if sm := verdict.GetSwitchModeRequestResponse(); sm != nil {
-							if rej := sm.GetRejected(); rej != nil {
-								reason := rej.GetReason()
-								localResult = `{"result":"rejected","reason":` + jsonStringEscape(reason) + `,"note":"User declined the mode switch. Stay in the previous mode and continue there."}`
-								if sess != nil {
-									sess.Mode = agentv1.AgentMode_AGENT_MODE_UNSPECIFIED
-								}
-							} else {
-								localResult = `{"result":"approved","note":"User approved. Mode is now active."}`
-							}
-						}
-					}
+					verdict := waitForInteractionResponse(ctx, waitCh, 0)
+					localResult = applyModeSwitchVerdict(sess, pill, interaction, verdict)
+					tools = openAIToolsForRequest(sess)
+					messages[0] = textMessage("system", systemPromptFor(sess.Mode))
 				} else if interaction != nil {
 					// Fire-and-forget for interactions that don't need a
 					// blocking verdict (e.g. first CreatePlan, which just
@@ -458,40 +451,21 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 			// seqAlias/shellAccum entry. See nextExecSeq doc for the bug
 			// this replaces.
 			seq := nextExecSeq()
-			waitCh := registerToolWait(requestID, pc.ID)
-			defer releaseToolWait(waitCh)
-			registerExecIDAlias(requestID, execID, seq, pc.ID)
+			waitCh := registerToolWait(scope, pc.ID)
+			registerExecIDAlias(scope, execID, seq, pc.ID)
 			if err := writeExecRequest(w, execID, seq, pc, tc); err != nil {
+				cancelToolWait(waitCh)
 				writeEndStreamError(w, err.Error())
 				DropSession(requestID)
 				return
 			}
-			// Shell with block_until_ms=0 is the model's explicit request to
-			// background the command (dev servers, watchers, long builds).
-			// We wait only briefly for the Start/ack event, then return a
-			// "backgrounded" sentinel — the command keeps running on Cursor's
-			// side and the model can poll via Read on the terminals folder.
-			waitWindow := 30 * time.Second
-			shellBackground := false
-			if pc.Name == "Shell" {
-				var sa struct {
-					BlockUntilMs  int32 `json:"block_until_ms"`
-					BlockUntilMs2 int32 `json:"blockUntilMs"`
-				}
-				_ = json.Unmarshal([]byte(pc.Arguments), &sa)
-				bu := sa.BlockUntilMs
-				if bu == 0 {
-					bu = sa.BlockUntilMs2
-				}
-				if bu == 0 && strings.Contains(pc.Arguments, "block_until_ms") {
-					// block_until_ms explicitly set to 0 → background.
-					shellBackground = true
-					waitWindow = 3 * time.Second
-				} else if bu > 0 && bu < 30000 {
-					waitWindow = time.Duration(bu+2000) * time.Millisecond
-				}
+			// Cursor owns execution timeouts and approvals. A pending permission
+			// dialog is not a failed tool; wait for its terminal event or cancel.
+			env := waitForNativeToolResult(ctx, waitCh)
+			if ctx.Err() != nil {
+				DropSession(requestID)
+				return
 			}
-			env := waitForToolResultContext(ctx, waitCh, waitWindow)
 
 			// Attach the tool result back onto the ToolCall proto so
 			// Cursor's pill renders stdout/stderr directly under the
@@ -506,27 +480,11 @@ func runAgentSession(ctx context.Context, requestID string, sess *Session, rawWr
 				DropSession(requestID)
 				return
 			}
-			// Feed the tool output back into the message history. When the
-			// wait window expires without Cursor reporting completion we
-			// emit the same "<shell-incomplete>" sentinel the working app
-			// uses — the model treats it as "I tried, no output, move on"
-			// instead of crashing the agent loop.
 			content := env.ResultJSON
 			if env.Error != "" {
-				switch {
-				case shellBackground && strings.Contains(env.Error, "timed out"):
-					content = `<shell-backgrounded>
-Command was started in background mode (block_until_ms=0) and is still running.
-To inspect progress or output, use the Read tool on a file under the terminals folder (see workspace context). The command will continue until it exits on its own or the IDE is closed.
-</shell-backgrounded>`
-				case strings.Contains(env.Error, "timed out"):
-					content = `<shell-incomplete>
-The foreground wait window expired without a terminal event. The command may still be running on Cursor's side; if you expected it to finish quickly, try running with block_until_ms set higher, or with block_until_ms=0 to background it and poll its terminal file.
-</shell-incomplete>`
-				default:
-					content = `{"error":` + jsonStringEscape(env.Error) + `}`
-				}
+				content = `{"error":` + jsonStringEscape(env.Error) + `}`
 			}
+
 			if content == "" {
 				content = `{"result":"ok"}`
 			}

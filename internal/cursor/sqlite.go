@@ -78,6 +78,21 @@ func prepareCursorAuthAt(dbPath, backupPath string) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read current Cursor account: %w", err)
 	}
+	var email string
+	emailErr := tx.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/cachedEmail").Scan(&email)
+	if emailErr != nil && !errors.Is(emailErr, sql.ErrNoRows) {
+		return fmt.Errorf("read current Cursor account marker: %w", emailErr)
+	}
+	// Windows safeStorage migration also wraps the legacy temporary token.
+	// On other platforms an encrypted real account is preserved verbatim;
+	// an encrypted temporary marker cannot be cleared without identifying it.
+	if runtime.GOOS == "windows" || email == fakeProEmail {
+		decoded, err := decodeCursorAuthToken(dbPath, token)
+		if err != nil {
+			return fmt.Errorf("cannot identify Cursor account; existing state retained: %w", err)
+		}
+		token = decoded
+	}
 	if IsLocalSessionToken(token) {
 		// An unbacked legacy fake is not an account we can recover. Remove
 		// only its known owned fields so Cursor can perform a normal sign-in.
@@ -102,13 +117,20 @@ func RestoreFakeProUser(backupPath string) error {
 }
 
 func restoreFakeProUserAt(dbPath, backupPath string) error {
+	return restoreFakeProUser(dbPath, backupPath, os.Remove)
+}
+
+func restoreFakeProUser(dbPath, backupPath string, removeBackup func(string) error) error {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	backup, err := readAuthBackup(backupPath)
-	if errors.Is(err, os.ErrNotExist) {
+	if backupPath == "" {
 		return nil
 	}
+	backup, err := readAuthBackup(backupPath)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
 	db, err := openCursorDB(dbPath)
@@ -121,39 +143,84 @@ func restoreFakeProUserAt(dbPath, backupPath string) error {
 		return err
 	}
 	defer tx.Rollback()
-	// A retained sidecar can outlive a completed restore (for example, its
-	// deletion was denied). Do not replay that old account over a newer login
-	// or logout. Matching the backed-up token still permits repairing an older
-	// version's partially completed restore of the other auth keys.
-	var currentToken string
-	tokenErr := tx.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/accessToken").Scan(&currentToken)
-	if tokenErr != nil && !errors.Is(tokenErr, sql.ErrNoRows) {
-		return fmt.Errorf("read current auth session: %w", tokenErr)
+	current, err := readCurrentAuth(tx)
+	if err != nil {
+		return err
 	}
-	hasToken := tokenErr == nil
-	originalToken := backup["cursorAuth/accessToken"]
-	matchesBackup := (!hasToken && originalToken == nil) || (hasToken && originalToken != nil && currentToken == *originalToken)
-	if (!hasToken || !IsLocalSessionToken(currentToken)) && !matchesBackup {
-		if err := tx.Commit(); err != nil {
-			return err
+	owned := false
+	// A completed restore followed by a failed sidecar deletion must never
+	// replay old credentials over a later login (or logout). Only the injected
+	// session owns this backup. The transaction also prevents partial restores.
+	// Cursor now migrates these tokens to safeStorage after startup. Compare
+	// the decoded value, never mistake an encrypted fake token for a new login.
+	if !sameAuthValues(current, backup) {
+		token := ""
+		if value := current[fakeAuthKeys[0]]; value != nil {
+			token, err = decodeCursorAuthToken(dbPath, *value)
+			if err != nil {
+				return fmt.Errorf("cannot identify current Cursor session; auth backup retained: %w", err)
+			}
 		}
-		return removeStateBackup(backupPath)
+		owned = IsLocalSessionToken(token)
+		// Earlier nontransactional versions could restore the original access
+		// token before failing on another row. Complete that exact-account repair.
+		if original := backup[fakeAuthKeys[0]]; original != nil && current[fakeAuthKeys[0]] != nil && *original == *current[fakeAuthKeys[0]] {
+			owned = true
+		}
+		if email := current[fakeAuthKeys[2]]; !owned && email != nil && *email == fakeProEmail {
+			return fmt.Errorf("current Cursor session changed but still has the temporary account marker; auth backup retained")
+		}
 	}
-	for _, key := range fakeAuthKeys {
-		value := backup[key]
-		if value == nil {
-			_, err = tx.Exec("DELETE FROM ItemTable WHERE key = ?", key)
-		} else {
-			_, err = tx.Exec("INSERT INTO ItemTable(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, *value)
-		}
-		if err != nil {
-			return fmt.Errorf("restore %s: %w", key, err)
+	if owned {
+		for _, key := range fakeAuthKeys {
+			val := backup[key]
+			if val == nil {
+				if _, err := tx.Exec("DELETE FROM ItemTable WHERE key = ?", key); err != nil {
+					return fmt.Errorf("restore delete %s: %w", key, err)
+				}
+				continue
+			}
+			if _, err := tx.Exec(
+				"INSERT INTO ItemTable(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+				key, *val,
+			); err != nil {
+				return fmt.Errorf("restore upsert %s: %w", key, err)
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	return removeStateBackup(backupPath)
+	if err := removeBackup(backupPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove restored auth backup: %w", err)
+	}
+	return nil
+}
+
+func readCurrentAuth(tx *sql.Tx) (map[string]*string, error) {
+	values := make(map[string]*string, len(fakeAuthKeys))
+	for _, key := range fakeAuthKeys {
+		var value string
+		switch err := tx.QueryRow("SELECT value FROM ItemTable WHERE key = ?", key).Scan(&value); err {
+		case nil:
+			values[key] = &value
+		case sql.ErrNoRows:
+			values[key] = nil
+		default:
+			return nil, fmt.Errorf("read current Cursor auth: %w", err)
+		}
+	}
+	return values, nil
+}
+
+func sameAuthValues(current, backup map[string]*string) bool {
+	for _, key := range fakeAuthKeys {
+		a, b := current[key], backup[key]
+		if (a == nil) != (b == nil) || (a != nil && *a != *b) {
+			return false
+		}
+	}
+	return true
 }
 
 func readAuthBackup(path string) (map[string]*string, error) {
@@ -345,6 +412,12 @@ func rewriteFeatureModelConfigs(d map[string]any, hexID string) {
 }
 
 func stateDBPath() string {
+	if root, set := cursorDataDirOverride(); set {
+		if root == "" {
+			return ""
+		}
+		return filepath.Join(root, "User", "globalStorage", "state.vscdb")
+	}
 	switch runtime.GOOS {
 	case "windows":
 		root := os.Getenv("APPDATA")

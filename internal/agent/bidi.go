@@ -74,12 +74,12 @@ func applyAgentBidiPayload(requestID string, raw []byte) Result {
 		// Route tool results back to the RunSSE goroutine waiting on them.
 		// Cursor posts ExecClientMessage with the matching tool_call_id
 		// (exec_id) once the IDE finishes running a tool.
-		routeExecClientResult(requestID, acm)
+		routeExecClientResult(bidiToolScope(requestID), acm)
 		// Route interaction verdicts (user approved/rejected a SwitchMode
 		// prompt, CreatePlan prompt, WebSearch prompt, etc.) back to the
 		// RunSSE goroutine that's blocking on the user's decision.
 		if ir := acm.GetInteractionResponse(); ir != nil {
-			deliverInteractionResponse(requestID, ir)
+			deliverInteractionResponse(bidiToolScope(requestID), ir)
 		}
 	}
 
@@ -137,7 +137,7 @@ func applyBugBotBidiPayload(requestID string, raw []byte) Result {
 			}
 		}
 		if execMsg := acm.GetExecClientMessage(); execMsg != nil {
-			routeBugBotExecClientResult(requestID, execMsg)
+			routeBugBotExecClientResult(bugBotToolScope(requestID), execMsg)
 		}
 	}
 
@@ -168,19 +168,7 @@ func extractIntoSession(sess *Session, acm *agentv1.AgentClientMessage) {
 		}
 		if action := run.GetAction(); action != nil {
 			sess.Action = action
-			if uma := action.GetUserMessageAction(); uma != nil {
-				if msg := uma.GetUserMessage(); msg != nil {
-					if msg.GetText() != "" {
-						sess.UserText = msg.GetText()
-					}
-					// Cursor stuffs the real mode (Plan/Ask/Debug/Agent) into
-					// UserMessage.mode (field 4). ConversationState.mode stays
-					// UNSPECIFIED regardless of UI selection.
-					if m := msg.GetMode(); m != agentv1.AgentMode_AGENT_MODE_UNSPECIFIED {
-						sess.Mode = m
-					}
-				}
-			}
+			extractConversationAction(sess, action)
 		}
 	}
 	if pre := acm.GetPrewarmRequest(); pre != nil && sess.ModelDetails == nil {

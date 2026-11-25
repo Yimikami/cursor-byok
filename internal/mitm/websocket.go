@@ -49,7 +49,7 @@ func handleAgentWebSocket(req *http.Request, serverCtx context.Context, resolver
 	}
 	proxyEnd, agentEnd := net.Pipe()
 	w := &upgradeResponse{header: make(http.Header), conn: agentEnd}
-	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{Subprotocols: []string{"cursor-agent-v1", "cursor-agent-preconnect-v1", "cursor-run-inference-v1", "cursor-run-inference-preconnect-v1"}})
+	conn, err := websocket.Accept(w, req, &websocket.AcceptOptions{Subprotocols: []string{"cursor-agent-v1", "cursor-agent-preconnect-v1", "cursor-run-inference-v1", "cursor-run-inference-preconnect-v1"}, OriginPatterns: []string{cursorRendererOrigin}})
 	if err != nil {
 		_ = proxyEnd.Close()
 		_ = agentEnd.Close()
@@ -64,6 +64,8 @@ func handleAgentWebSocket(req *http.Request, serverCtx context.Context, resolver
 			if authorize == nil {
 				return false
 			}
+			// Browser preconnect cannot send custom upgrade headers. Cursor
+			// supplies the real account header inside each native RunStart.
 			if len(headers.Values("Authorization")) == 0 {
 				headers = req.Header
 			}
