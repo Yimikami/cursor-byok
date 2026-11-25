@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	"sync"
 
 	"cursor-byok/internal/bridge"
 
@@ -40,21 +41,23 @@ func main() {
 		os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 	}
 
-	proxySvc, err := bridge.NewProxyService()
-	if err != nil {
-		log.Fatalf("failed to init proxy service: %v", err)
-	}
-
 	var window *application.WebviewWindow
+	var requestQuit func()
 
 	app := application.New(application.Options{
 		Name:        "cursor-byok",
 		Description: "cursor-byok - Local MITM proxy & BYOK gateway for Cursor IDE",
-		Services: []application.Service{
-			application.NewService(proxySvc),
-		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
+		},
+		ShouldQuit: func() bool {
+			if requestQuit == nil {
+				return true
+			}
+			// Cocoa invokes this on its UI thread. Veto immediately and
+			// perform restoration through the same worker as tray Quit.
+			go requestQuit()
+			return false
 		},
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
@@ -69,6 +72,13 @@ func main() {
 			},
 		},
 	})
+	// Acquire the single-instance lock before recovery. NewProxyService
+	// restores stale settings even if loading the local CA subsequently fails.
+	proxySvc, err := bridge.NewProxyService()
+	if err != nil {
+		log.Fatalf("failed to init proxy service: %v", err)
+	}
+	app.RegisterService(application.NewService(proxySvc))
 
 	window = app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:         "cursor-byok",
@@ -85,11 +95,25 @@ func main() {
 		URL:              "/",
 	})
 
+	var quitMu sync.Mutex
 	forceQuit := func() {
+		if !quitMu.TryLock() {
+			return
+		}
+		defer quitMu.Unlock()
+		_, err := proxySvc.StopProxy()
+		if err != nil {
+			window.Show()
+			app.Dialog.Warning().
+				SetTitle("cursor-byok").
+				SetMessage("Could not finish restoring your saved settings. Retry Stop or Quit:\n" + err.Error()).
+				Show()
+			return
+		}
 		window.Hide()
-		proxySvc.Shutdown()
 		os.Exit(0)
 	}
+	requestQuit = forceQuit
 
 	// Clicking the window close button routes through the user's saved
 	// preference. First-run = unset → cancel the close and ask the frontend
@@ -102,10 +126,9 @@ func main() {
 			window.Hide()
 			e.Cancel()
 		case "quit":
-			// Tear down the proxy before letting the window close so the
-			// system proxy / Cursor settings get reverted cleanly. Let the
-			// close event proceed — os.Exit ensures the process exits
-			// instantly without waiting for Wails to figure it out.
+			// Keep the app available when restoration fails so the user can
+			// retry without leaving a dead system proxy behind.
+			e.Cancel()
 			go forceQuit()
 		default:
 			// No pinned preference yet. Keep the window visible while the
@@ -185,7 +208,7 @@ func main() {
 			tray.SetTooltip("cursor-byok - stopped")
 		}
 		startItem.SetEnabled(!running)
-		stopItem.SetEnabled(running)
+		stopItem.SetEnabled(running || proxySvc.GetState().LastError != "")
 	}
 	applyTrayState(false)
 

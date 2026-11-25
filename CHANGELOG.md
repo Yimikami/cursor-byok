@@ -7,7 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
--
+### Fixed
+
+- Support Cursor's `/agent/v1/run` WebSocket v1 transport alongside the legacy SSE transport; handle the handshake, run lifecycle, ordered agent messages, cancellation, and terminal errors locally (#12).
+- Verify the actual local CA certificate instead of accepting any certificate with the same name. Preserve damaged/incomplete CA files for recovery and install macOS trust in the current user's trust domain.
+- Check service prerequisites before changing the system proxy, roll back failed setup, retain a reachable listener when restoration fails, and recover saved settings after an interrupted session.
+- Preserve Windows proxy values and their absence, report backup failures, restore partial changes, and leave unrelated proxy settings untouched when no recovery record exists.
+- Accept comments and trailing commas in Cursor's JSONC settings.
+
+### Added
+
+- Regression coverage for certificate identity, proxy failure recovery, JSONC settings, and TLS WebSocket agent streaming. CI now runs the Go test suite on Windows, macOS, and Linux.
 
 ## [1.0.2] - 2026-07-26
 

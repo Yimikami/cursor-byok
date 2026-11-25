@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -20,20 +22,6 @@ const (
 	internetOptionSettingsChanged = 39
 	internetOptionRefresh         = 37
 )
-
-// sysProxyBackup is the pre-override snapshot of the three WinINET proxy
-// keys we touch. "Has*" reflects whether the registry value existed at
-// snapshot time — a missing value must be deleted on restore, not written
-// back as an empty string (that would look like "proxy set to empty" to
-// other apps reading the keys).
-type sysProxyBackup struct {
-	HasEnable   bool   `json:"hasEnable"`
-	Enable      uint32 `json:"enable,omitempty"`
-	HasServer   bool   `json:"hasServer"`
-	Server      string `json:"server,omitempty"`
-	HasOverride bool   `json:"hasOverride"`
-	Override    string `json:"override,omitempty"`
-}
 
 func sysProxyBackupPath() string {
 	dir, err := configDir()
@@ -50,19 +38,7 @@ func readCurrentSysProxy() (sysProxyBackup, error) {
 		return bk, err
 	}
 	defer k.Close()
-	if v, _, err := k.GetIntegerValue("ProxyEnable"); err == nil {
-		bk.HasEnable = true
-		bk.Enable = uint32(v)
-	}
-	if v, _, err := k.GetStringValue("ProxyServer"); err == nil {
-		bk.HasServer = true
-		bk.Server = v
-	}
-	if v, _, err := k.GetStringValue("ProxyOverride"); err == nil {
-		bk.HasOverride = true
-		bk.Override = v
-	}
-	return bk, nil
+	return readProxyValues(k)
 }
 
 func saveSysProxyBackup(bk sysProxyBackup) error {
@@ -77,7 +53,7 @@ func saveSysProxyBackup(bk sysProxyBackup) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0o644)
+	return writeSystemProxyBackup(p, b)
 }
 
 func loadSysProxyBackup() (sysProxyBackup, error) {
@@ -101,96 +77,62 @@ func loadSysProxyBackup() (sysProxyBackup, error) {
 // proxy. If a backup already exists we leave it untouched — that file is
 // the user's last-known-good state and must survive crash-restart cycles.
 func EnableSystemProxy(addr string) error {
-	// Snapshot only when no backup exists yet. This keeps Enable idempotent
-	// and crash-safe: a second Enable after a crash won't overwrite the
-	// pristine state with whatever we already stamped in last time.
-	if _, err := os.Stat(sysProxyBackupPath()); os.IsNotExist(err) {
-		if bk, readErr := readCurrentSysProxy(); readErr == nil {
-			if saveErr := saveSysProxyBackup(bk); saveErr != nil {
-				return fmt.Errorf("snapshot system proxy: %w", saveErr)
-			}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" {
+		return fmt.Errorf("invalid proxy address %q", addr)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil || portNum < 1 || portNum > 65535 {
+		return fmt.Errorf("invalid proxy port %q", port)
+	}
+	// A corrupt or unreadable backup is not permission to overwrite it.
+	if _, err := loadSysProxyBackup(); errors.Is(err, os.ErrNotExist) {
+		bk, err := readCurrentSysProxy()
+		if err != nil {
+			return fmt.Errorf("read system proxy before override: %w", err)
 		}
+		if err := saveSysProxyBackup(bk); err != nil {
+			return fmt.Errorf("snapshot system proxy: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("read system proxy backup: %w", err)
 	}
 
-	k, _, err := registry.CreateKey(registry.CURRENT_USER, inetSettingsKey, registry.SET_VALUE)
+	k, _, err := registry.CreateKey(registry.CURRENT_USER, inetSettingsKey, registry.SET_VALUE|registry.QUERY_VALUE)
 	if err != nil {
 		return err
 	}
 	defer k.Close()
-	if err := k.SetDWordValue("ProxyEnable", 1); err != nil {
-		return err
-	}
-	if err := k.SetStringValue("ProxyServer", addr); err != nil {
-		return err
-	}
-	if err := k.SetStringValue("ProxyOverride", "<local>"); err != nil {
-		return err
+	if err := applyProxyValues(k, addr); err != nil {
+		// Restore before returning; otherwise bridge will stop the listener
+		// while Windows can still point at the partially configured proxy.
+		return errors.Join(err, DisableSystemProxy())
 	}
 	notifyInetSettingsChanged()
 	return nil
 }
 
-// DisableSystemProxy restores the WinINET state captured by EnableSystemProxy.
-// Missing values are deleted (rather than left at our override) so any
-// pre-existing corporate/custom proxy survives a cursor-byok start/stop
-// cycle. When no backup exists we fall back to just clearing ProxyEnable.
+// DisableSystemProxy restores only a recorded override. Without a backup we
+// do not own the current settings, so stopping must not disable another proxy.
 func DisableSystemProxy() error {
+	bk, err := loadSysProxyBackup()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read system proxy backup: %w", err)
+	}
 	k, err := registry.OpenKey(registry.CURRENT_USER, inetSettingsKey, registry.SET_VALUE|registry.QUERY_VALUE)
 	if err != nil {
 		return err
 	}
 	defer k.Close()
-
-	bk, loadErr := loadSysProxyBackup()
-	if loadErr != nil {
-		// No backup → best-effort: turn the flag off and leave the rest as
-		// the user's state at the end of the session. Mirrors the original
-		// behaviour for upgrade paths that predate the backup sidecar.
-		if setErr := k.SetDWordValue("ProxyEnable", 0); setErr != nil {
-			return setErr
-		}
+	if err := restoreProxyValues(k, bk); err != nil {
 		notifyInetSettingsChanged()
-		return nil
+		return err // Preserve the backup for a later retry.
 	}
-
-	restoreDword := func(name string, has bool, val uint32) error {
-		if has {
-			return k.SetDWordValue(name, val)
-		}
-		// DeleteValue on a missing key returns ERROR_FILE_NOT_FOUND which is
-		// fine — treat it as a no-op instead of a failure.
-		if delErr := k.DeleteValue(name); delErr != nil && !errors.Is(delErr, registry.ErrNotExist) {
-			return delErr
-		}
-		return nil
-	}
-	restoreString := func(name string, has bool, val string) error {
-		if has {
-			return k.SetStringValue(name, val)
-		}
-		if delErr := k.DeleteValue(name); delErr != nil && !errors.Is(delErr, registry.ErrNotExist) {
-			return delErr
-		}
-		return nil
-	}
-
-	if err := restoreDword("ProxyEnable", bk.HasEnable, bk.Enable); err != nil {
-		return err
-	}
-	if err := restoreString("ProxyServer", bk.HasServer, bk.Server); err != nil {
-		return err
-	}
-	if err := restoreString("ProxyOverride", bk.HasOverride, bk.Override); err != nil {
-		return err
-	}
-
-	// Remove the sidecar so the NEXT Enable re-snapshots a pristine state
-	// (otherwise a user who changes their real proxy between sessions would
-	// end up restoring the stale original on the following Stop).
-	_ = os.Remove(sysProxyBackupPath())
-
 	notifyInetSettingsChanged()
-	return nil
+	return os.Remove(sysProxyBackupPath())
 }
 
 // IsSystemProxyEnabled reports whether WinINET proxy is currently on AND

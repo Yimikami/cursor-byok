@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -34,10 +35,17 @@ func LoadOrCreate(dir string) (*CA, error) {
 	cb, certErr := os.ReadFile(certPath)
 	kb, keyErr := os.ReadFile(keyPath)
 	if certErr == nil && keyErr == nil {
-		if ca, err := parsePEM(cb, kb); err == nil {
-			ca.dir = dir
-			return ca, nil
+		ca, err := parsePEM(cb, kb)
+		if err != nil {
+			return nil, fmt.Errorf("load existing CA (files preserved): %w", err)
 		}
+		ca.dir = dir
+		return ca, nil
+	}
+	// Never silently replace an installed CA after a read error or a lost
+	// key: the replacement would share its name but would not be trusted.
+	if !errors.Is(certErr, os.ErrNotExist) || !errors.Is(keyErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("CA certificate/key pair is incomplete or unreadable (files preserved): %w", errors.Join(certErr, keyErr))
 	}
 
 	ca, err := generate()
@@ -66,7 +74,7 @@ func generate() (*CA, error) {
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   "cursor-byok Local CA",
+			CommonName:   caCommonName,
 			Organization: []string{"cursor-byok"},
 		},
 		NotBefore:             time.Now().Add(-time.Hour),
@@ -104,6 +112,19 @@ func parsePEM(certPEM, keyPEM []byte) (*CA, error) {
 	key, err := x509.ParsePKCS1PrivateKey(kb.Bytes)
 	if err != nil {
 		return nil, err
+	}
+	publicKey, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok || publicKey.E != key.PublicKey.E || publicKey.N.Cmp(key.PublicKey.N) != 0 {
+		return nil, errors.New("CA certificate and private key do not match")
+	}
+	if !cert.IsCA || !cert.BasicConstraintsValid || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, errors.New("certificate is not a signing CA")
+	}
+	if err := cert.CheckSignatureFrom(cert); err != nil {
+		return nil, fmt.Errorf("CA is not self-signed: %w", err)
+	}
+	if now := time.Now(); now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return nil, errors.New("CA certificate is not currently valid")
 	}
 	return &CA{Cert: cert, Key: key, CertDER: cb.Bytes, certPEM: certPEM, keyPEM: keyPEM}, nil
 }

@@ -1,6 +1,12 @@
 package certs
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha1"
+	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const caCommonName = "cursor-byok Local CA"
@@ -29,7 +36,7 @@ func InstallUserRoot(certPath string) error {
 		if err != nil {
 			return err
 		}
-		cmd := exec.Command("security", "add-trusted-cert", "-d", "-r", "trustRoot", "-k", keychain, certPath)
+		cmd := exec.Command("security", "add-trusted-cert", "-r", "trustRoot", "-k", keychain, certPath)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("security add-trusted-cert: %w (%s)", err, trim(out))
@@ -53,32 +60,37 @@ func InstallUserRoot(certPath string) error {
 }
 
 // UninstallUserRoot removes our CA from the current-user trusted root store.
-func UninstallUserRoot() error {
+func UninstallUserRoot(certPaths ...string) error {
+	certPath, err := activeCertPath(certPaths)
+	if err != nil {
+		return err
+	}
+	cert, err := readRootCertificate(certPath)
+	if err != nil {
+		return err
+	}
 	switch runtime.GOOS {
 	case "windows":
-		cmd := exec.Command("certutil", "-user", "-delstore", "Root", caCommonName)
+		cmd := exec.Command("certutil", "-user", "-delstore", "Root", certificateStoreID(cert))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("certutil: %w (%s)", err, trim(out))
 		}
 		return nil
 	case "darwin":
-		keychain, err := darwinLoginKeychain()
-		if err != nil {
-			return err
-		}
-		certPath, err := darwinInstalledCertTempFile()
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
+		out, removeErr := exec.Command("security", "remove-trusted-cert", certPath).CombinedOutput()
+		// Older releases wrote admin-domain trust despite documenting a
+		// user-only install. Remove that legacy trust only when this exact
+		// certificate remains trusted after removing user-domain trust.
+		if IsInstalledUserRoot(certPath) {
+			out, err := exec.Command("security", "remove-trusted-cert", "-d", certPath).CombinedOutput()
+			if err != nil {
+				return fmt.Errorf("remove legacy admin CA trust: %w (%s)", err, trim(out))
 			}
-			return err
+			return nil
 		}
-		defer os.Remove(certPath)
-		cmd := exec.Command("security", "remove-trusted-cert", "-d", certPath, keychain)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("security remove-trusted-cert: %w (%s)", err, trim(out))
+		if removeErr != nil {
+			return fmt.Errorf("security remove-trusted-cert: %w (%s)", removeErr, trim(out))
 		}
 		return nil
 	case "linux":
@@ -88,6 +100,18 @@ func UninstallUserRoot() error {
 		}
 		if _, err := exec.LookPath("certutil"); err != nil {
 			return nil
+		}
+		installed, err := exec.Command("certutil", "-L", "-d", db, "-n", caCommonName, "-a").CombinedOutput()
+		if err != nil {
+			msg := strings.ToLower(string(installed))
+			if strings.Contains(msg, "could not find cert") || strings.Contains(msg, "not found") {
+				return nil
+			}
+			return fmt.Errorf("read NSS certificate before removal: %w (%s)", err, trim(installed))
+		}
+		block, _ := pem.Decode(installed)
+		if block == nil || !bytes.Equal(block.Bytes, cert.Raw) {
+			return errors.New("NSS certificate with this name does not match the active CA; it was not removed")
 		}
 		cmd := exec.Command("certutil", "-D", "-d", db, "-n", caCommonName)
 		out, err := cmd.CombinedOutput()
@@ -104,40 +128,85 @@ func UninstallUserRoot() error {
 	}
 }
 
-// IsInstalledUserRoot reports whether our CA is present in the current-user
-// trusted root store. Matching is done by CA common name, which is stable
-// across CA rebuilds because we never change it.
-func IsInstalledUserRoot() bool {
-	switch runtime.GOOS {
+// IsInstalledUserRoot checks the actual CA certificate, not its common name.
+// With no path it uses the application's normal config directory. A stale root
+// from a previous install must not make a newly generated CA look trusted.
+func IsInstalledUserRoot(certPaths ...string) bool {
+	certPath, err := activeCertPath(certPaths)
+	if err != nil {
+		return false
+	}
+	return isInstalledUserRoot(runtime.GOOS, certPath, runCertCheck)
+}
+
+func activeCertPath(paths []string) (string, error) {
+	if len(paths) > 0 {
+		return paths[0], nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "cursor-byok", "ca", "ca.crt"), nil
+}
+
+func readRootCertificate(path string) (*x509.Certificate, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("invalid CA certificate PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	return cert, nil
+}
+
+// SHA-1 is the Windows/macOS certificate-store identifier, not a signature.
+func certificateStoreID(cert *x509.Certificate) string {
+	sum := sha1.Sum(cert.Raw)
+	return hex.EncodeToString(sum[:])
+}
+
+func runCertCheck(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
+func isInstalledUserRoot(platform, certPath string, run func(string, ...string) ([]byte, error)) bool {
+	cert, err := readRootCertificate(certPath)
+	if err != nil || !cert.IsCA || time.Now().Before(cert.NotBefore) || time.Now().After(cert.NotAfter) {
+		return false
+	}
+	switch platform {
 	case "windows":
-		out, err := exec.Command("certutil", "-user", "-store", "Root").CombinedOutput()
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(out), caCommonName)
+		_, err := run("certutil", "-user", "-store", "Root", certificateStoreID(cert))
+		return err == nil
 	case "darwin":
-		keychain, err := darwinLoginKeychain()
-		if err != nil {
-			return false
-		}
-		out, err := exec.Command("security", "find-certificate", "-a", "-c", caCommonName, "-Z", keychain).CombinedOutput()
-		if err != nil {
-			return false
-		}
-		return strings.Contains(string(out), caCommonName)
+		// Presence in a keychain does not imply trust. Evaluate the exact
+		// certificate against local trust settings, allowing a CA as leaf.
+		_, err := run("security", "verify-cert", "-q", "-L", "-l", "-p", "basic", "-c", certPath)
+		return err == nil
 	case "linux":
 		db, err := linuxNSSDBPath()
 		if err != nil {
 			return false
 		}
-		if _, err := exec.LookPath("certutil"); err != nil {
-			return false
-		}
-		out, err := exec.Command("certutil", "-L", "-d", db, "-n", caCommonName).CombinedOutput()
+		out, err := run("certutil", "-L", "-d", db, "-n", caCommonName, "-a")
 		if err != nil {
 			return false
 		}
-		return strings.Contains(string(out), caCommonName)
+		block, _ := pem.Decode(out)
+		if block == nil || !bytes.Equal(block.Bytes, cert.Raw) {
+			return false
+		}
+		_, err = run("certutil", "-V", "-d", db, "-n", caCommonName, "-u", "L")
+		return err == nil
 	default:
 		return false
 	}
@@ -149,30 +218,6 @@ func darwinLoginKeychain() (string, error) {
 		return "", fmt.Errorf("resolve home dir: %w", err)
 	}
 	return filepath.Join(home, "Library", "Keychains", "login.keychain-db"), nil
-}
-
-func darwinInstalledCertTempFile() (string, error) {
-	keychain, err := darwinLoginKeychain()
-	if err != nil {
-		return "", err
-	}
-	out, err := exec.Command("security", "find-certificate", "-a", "-c", caCommonName, "-p", keychain).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("security find-certificate: %w (%s)", err, trim(out))
-	}
-	pem := strings.TrimSpace(string(out))
-	if pem == "" {
-		return "", os.ErrNotExist
-	}
-	f, err := os.CreateTemp("", "cursor-byok-ca-*.crt")
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if _, err := f.WriteString(pem + "\n"); err != nil {
-		return "", err
-	}
-	return f.Name(), nil
 }
 
 func linuxNSSDBPath() (string, error) {
