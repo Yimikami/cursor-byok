@@ -103,7 +103,7 @@ func HandleBugBotRunSSE(ctx context.Context, reqBody []byte, contentType string,
 		}
 	}()
 
-	resp, err := runBugBotReview(ctx, sess, target.BaseURL, target.APIKey, target.Model, target.Opts, stream, w)
+	resp, err := runBugBotReview(ctx, requestID, sess, target.BaseURL, target.APIKey, target.Model, target.Opts, stream, w)
 	if err != nil {
 		writeBugBotEndStreamError(w, err.Error())
 		DropSession(requestID)
@@ -188,7 +188,7 @@ func buildCommitMessagePrompt(req *aiserverv1.WriteGitCommitMessageRequest) stri
 	return b.String()
 }
 
-func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model string, opts AdapterOpts, stream providerStreamer, w io.Writer) (*aiserverv1.StreamBugBotResponse, error) {
+func runBugBotReview(ctx context.Context, requestID string, sess *Session, baseURL, apiKey, model string, opts AdapterOpts, stream providerStreamer, w io.Writer) (*aiserverv1.StreamBugBotResponse, error) {
 	if sess == nil || sess.BugBotRequest == nil {
 		return nil, fmt.Errorf("missing bugbot request")
 	}
@@ -229,16 +229,17 @@ func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model 
 			return nil, err
 		}
 		if result.FinishReason == "length" || result.FinishReason == "max_tokens" {
-			return nil, fmt.Errorf("provider reached the output limit before finishing the review")
+			return nil, fmt.Errorf("review reached the output limit before finishing")
 		}
 		if len(result.ToolCalls) == 0 {
 			finished = true
 			break
 		}
-		assistantMsg := openAIMessage{Role: "assistant", AnthropicContent: result.AnthropicContent}
+		assistantMsg := openAIMessage{Role: "assistant"}
 		if answer.Len() > 0 {
 			assistantMsg.Content = json.RawMessage(jsonString(answer.String()))
 		}
+		preserveProviderReasoning(&assistantMsg, result)
 		for _, tc := range result.ToolCalls {
 			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, openAIToolCallMsg{ID: tc.ID, Type: "function", Function: openAIToolCallFn{Name: tc.Name, Arguments: tc.Arguments}})
 		}
@@ -255,13 +256,13 @@ func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model 
 			}
 			execID := newExecID(execToolName(pc.Name))
 			seq := nextExecSeq()
-			waitCh := registerToolWait(sess.RequestID, pc.ID)
-			defer releaseToolWait(waitCh)
-			registerExecIDAlias(sess.RequestID, execID, seq, pc.ID)
+			waitCh := registerToolWait(bugBotToolScope(requestID), pc.ID)
+			registerExecIDAlias(bugBotToolScope(requestID), execID, seq, pc.ID)
 			if err := writeBugBotExecRequest(w, execID, seq, pc, tc); err != nil {
+				cancelToolWait(waitCh)
 				return nil, err
 			}
-			env := waitForToolResult(waitCh, 30*time.Second)
+			env := waitForNativeToolResult(ctx, waitCh)
 			content := env.ResultJSON
 			if env.Error != "" {
 				content = `<bugbot-tool-error>` + env.Error + `</bugbot-tool-error>`
@@ -536,7 +537,7 @@ func writeBugBotEndStreamError(w io.Writer, msg string) {
 	_ = writeEndStream(w)
 }
 
-func routeBugBotExecClientResult(owner string, msg *aiserverv1.ExecClientMessage) {
+func routeBugBotExecClientResult(scope toolWaitScope, msg *aiserverv1.ExecClientMessage) {
 	if msg == nil {
 		return
 	}
@@ -544,18 +545,9 @@ func routeBugBotExecClientResult(owner string, msg *aiserverv1.ExecClientMessage
 	if err != nil {
 		return
 	}
-	env := &toolResultEnvelope{ResultJSON: string(body), Error: ""}
-	if execID := msg.GetExecId(); execID != "" {
-		deliverToolResult(owner, execID, env)
-		return
-	}
 	pendingMu.Lock()
-	callID := seqAlias[sequenceWaitKey{owner, msg.GetId()}]
-	if callID != "" {
-		delete(seqAlias, sequenceWaitKey{owner, msg.GetId()})
-	}
-	pendingMu.Unlock()
-	if callID != "" {
-		deliverToolResult(owner, callID, env)
+	defer pendingMu.Unlock()
+	if key, ok := pendingKeyLocked(scope, msg.GetExecId(), msg.GetId()); ok {
+		completePendingLocked(key, &toolResultEnvelope{ResultJSON: string(body)})
 	}
 }

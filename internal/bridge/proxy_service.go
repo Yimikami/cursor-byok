@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -329,14 +326,14 @@ func (s *ProxyService) UninstallCA() (ProxyState, error) {
 	return s.state, nil
 }
 
-// authBackupPath returns the JSON sidecar where we stash the user's
-// original cursorAuth/* values before injecting our fake Pro session.
+// authBackupPath identifies the legacy auth sidecar for this Cursor profile.
+// New sessions preserve the user's genuine account.
 func (s *ProxyService) authBackupPath() string {
-	return filepath.Join(s.cfgDir, "cursor-auth-backup.json")
+	return filepath.Join(s.cfgDir, cursor.ProfileBackupName("cursor-auth-backup.json"))
 }
 
 func (s *ProxyService) modelBackupPath() string {
-	return filepath.Join(s.cfgDir, "cursor-model-backup.json")
+	return filepath.Join(s.cfgDir, cursor.ProfileBackupName("cursor-model-backup.json"))
 }
 
 func (s *ProxyService) SetBaseURL(url string) (ProxyState, error) {
@@ -455,60 +452,23 @@ func runAdapterPing(a ModelAdapterConfig) string {
 	if a.ModelID == "" {
 		return "missing model id"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	msg, err := runAdapterInferenceTest(ctx, a)
+	_, err := runAdapterInferenceTest(ctx, a)
 	if err != nil {
 		return err.Error()
-	}
-	if strings.TrimSpace(msg) == "" {
-		return "ok"
 	}
 	return "ok"
 }
 
 func runAdapterInferenceTest(ctx context.Context, a ModelAdapterConfig) (string, error) {
-	base := strings.TrimRight(a.BaseURL, "/")
-	var url string
-	req := (*http.Request)(nil)
-	var err error
-	switch strings.ToLower(a.Type) {
-	case "anthropic":
-		url = base + "/v1/messages"
-		payload := strings.NewReader(`{"model":` + strconv.Quote(a.ModelID) + `,"max_tokens":16,"messages":[{"role":"user","content":"Reply with OK only."}]}`)
-		req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-		if err != nil {
-			return "", errors.New("bad URL: " + err.Error())
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-api-key", a.APIKey)
-		req.Header.Set("anthropic-version", "2023-06-01")
-	default:
-		url = base + "/chat/completions"
-		payload := strings.NewReader(`{"model":` + strconv.Quote(a.ModelID) + `,"messages":[{"role":"user","content":"Reply with OK only."}],"max_tokens":16}`)
-		req, err = http.NewRequestWithContext(ctx, http.MethodPost, url, payload)
-		if err != nil {
-			return "", errors.New("bad URL: " + err.Error())
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+a.APIKey)
-	}
-	client := &http.Client{Timeout: 20 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", errors.New("network error: " + trimErr(err))
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return strings.TrimSpace(string(body)), nil
-	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-	snippet := strings.TrimSpace(string(body))
-	if len(snippet) > 140 {
-		snippet = snippet[:140] + "…"
-	}
-	return "", fmt.Errorf("http %d — %s", resp.StatusCode, snippet)
+	opts := agent.AdapterOpts{MaxOutputTokens: 512, ServiceTier: a.ServiceTier}
+	// The UI's default "None" choice is not evidence that a provider accepts
+	// reasoning_effort. Keep the connectivity probe on the basic API contract.
+	return agent.ProbeAdapter(ctx, agent.AdapterTarget{
+		ProviderType: a.Type, BaseURL: a.BaseURL, APIKey: a.APIKey,
+		Model: a.ModelID, Opts: opts,
+	})
 }
 
 func trimErr(err error) string {

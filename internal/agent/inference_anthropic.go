@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"google.golang.org/protobuf/encoding/protowire"
+	inferencev1 "cursor-byok/internal/protocodec/gen/inference/v1"
 )
 
 // Cursor 3.32.4 preserves ResponseMessage.anthropic_native_content (field12)
@@ -40,60 +40,46 @@ func validateAnthropicNativeContent(raw json.RawMessage) error {
 	return nil
 }
 
-func encodeInferenceAnthropicMessage(message []byte, raw json.RawMessage, model string) ([]byte, error) {
+// Keep the native assistant part order alongside the authoritative raw content.
+// Cursor may replay either representation on the next invocation.
+func preserveInferenceAnthropicOrder(message *inferencev1.InferenceResponseMessage, raw json.RawMessage) error {
 	if err := validateAnthropicNativeContent(raw); err != nil {
-		return nil, err
+		return err
 	}
-	message = append(message, providerProtoBytes(12, raw)...)
 	var blocks []anthropicContentBlock
 	_ = json.Unmarshal(raw, &blocks)
 	for _, block := range blocks {
-		kind := uint64(0)
 		switch block.Type {
 		case "thinking", "redacted_thinking":
-			kind = 1
-			part := providerProtoString(5, model)
-			if block.Type == "thinking" {
-				part = append(part, providerProtoString(2, block.Thinking)...)
-				part = append(part, providerProtoString(3, block.Signature)...)
-			} else {
-				part = append(part, providerProtoVarint(1, 1)...)
-				part = append(part, providerProtoString(4, block.Data)...)
-			}
-			message = append(message, providerProtoBytes(6, part)...)
+			message.AssistantPartOrder = append(message.AssistantPartOrder, 1)
 		case "text":
-			kind = 2
-			message = append(message, providerProtoString(11, block.Text)...)
+			message.AssistantPartOrder = append(message.AssistantPartOrder, 2)
+			message.AssistantTextParts = append(message.AssistantTextParts, block.Text)
 		case "tool_use":
-			kind = 3
+			message.AssistantPartOrder = append(message.AssistantPartOrder, 3)
 		}
-		message = append(message, providerProtoVarint(10, kind)...)
 	}
-	return message, nil
+	return nil
 }
 
-func decodeInferenceAnthropicContent(fields providerWireFields, message openAIMessage) (json.RawMessage, error) {
-	if raw := fields.lastBytes(18); len(raw) > 0 {
-		return append(json.RawMessage(nil), raw...), nil
+func decodeInferenceAnthropicContent(native *inferencev1.InferenceCoreMessage, message openAIMessage) (json.RawMessage, error) {
+	if raw := native.GetAnthropicNativeContent(); raw != "" {
+		return append(json.RawMessage(nil), []byte(raw)...), nil
 	}
-	if len(fields.bytes(7)) == 0 {
+	if len(native.GetReasoningParts()) == 0 {
 		return nil, nil
 	}
 	var reasoning, text, tools []anthropicContentBlock
-	for _, raw := range fields.bytes(7) {
-		part, err := providerProtoFields(raw)
-		if err != nil {
-			return nil, err
-		}
-		block := anthropicContentBlock{Type: "thinking", Thinking: string(part.lastBytes(2)), Signature: string(part.lastBytes(3))}
-		if part.varint(1) != 0 {
-			block = anthropicContentBlock{Type: "redacted_thinking", Data: string(part.lastBytes(4))}
+	for _, part := range native.GetReasoningParts() {
+		block := anthropicContentBlock{Type: "thinking", Thinking: part.GetText(), Signature: part.GetSignature()}
+		if part.GetIsRedacted() {
+			block = anthropicContentBlock{Type: "redacted_thinking", Data: part.GetRedactedData()}
 		}
 		reasoning = append(reasoning, block)
 	}
-	if parts := fields.bytes(17); len(parts) > 0 {
+	if parts := native.GetAssistantTextParts(); len(parts) > 0 {
 		for _, part := range parts {
-			text = append(text, anthropicContentBlock{Type: "text", Text: string(part)})
+			text = append(text, anthropicContentBlock{Type: "text", Text: part})
 		}
 	} else if value, ok := decodeAsString(message.Content); ok && value != "" {
 		text = append(text, anthropicContentBlock{Type: "text", Text: value})
@@ -101,25 +87,7 @@ func decodeInferenceAnthropicContent(fields providerWireFields, message openAIMe
 	for _, call := range message.ToolCalls {
 		tools = append(tools, anthropicContentBlock{Type: "tool_use", ID: call.ID, Name: call.Function.Name, Input: json.RawMessage(call.Function.Arguments)})
 	}
-	var order []uint64
-	for _, field := range fields {
-		if field.number != 16 {
-			continue
-		}
-		if field.kind == protowire.VarintType {
-			order = append(order, field.value)
-		}
-		if field.kind == protowire.BytesType {
-			for raw := field.data; len(raw) > 0; {
-				value, n := protowire.ConsumeVarint(raw)
-				if n < 0 {
-					return nil, protowire.ParseError(n)
-				}
-				order = append(order, value)
-				raw = raw[n:]
-			}
-		}
-	}
+	order := native.GetAssistantPartOrder()
 	var blocks []anthropicContentBlock
 	if len(order) == 0 {
 		for _, block := range reasoning {
@@ -129,7 +97,7 @@ func decodeInferenceAnthropicContent(fields providerWireFields, message openAIMe
 		}
 		blocks = append(append(reasoning, text...), tools...)
 	} else {
-		parts := map[uint64][]anthropicContentBlock{1: reasoning, 2: text, 3: tools}
+		parts := map[int32][]anthropicContentBlock{1: reasoning, 2: text, 3: tools}
 		for _, kind := range order {
 			if len(parts[kind]) == 0 {
 				return nil, errors.New("invalid assistant part order")

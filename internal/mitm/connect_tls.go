@@ -76,7 +76,7 @@ func serveCursorTLS(serverCtx context.Context, proxy *goproxy.ProxyHttpServer, t
 			http.Error(w, "invalid HTTP preface", http.StatusBadRequest)
 			return
 		}
-		if req.Method == http.MethodConnect || req.URL == nil || !sameTunnelAuthority(req.Host, connect.Host) || req.URL.User != nil || (req.URL.Host != "" && (!sameTunnelAuthority(req.URL.Host, connect.Host) || req.URL.Scheme != "https")) {
+		if req.Method == http.MethodConnect || req.URL == nil || req.URL.Path == "*" || !sameTunnelAuthority(req.Host, connect.Host) || req.URL.User != nil || (req.URL.Host != "" && (!sameTunnelAuthority(req.URL.Host, connect.Host) || req.URL.Scheme != "https")) {
 			http.Error(w, "invalid tunnel request", http.StatusBadRequest)
 			return
 		}
@@ -91,9 +91,19 @@ func serveCursorTLS(serverCtx context.Context, proxy *goproxy.ProxyHttpServer, t
 			// each copied chunk instead of waiting for the stream to terminate.
 			responseWriter = flushingTunnelWriter{ResponseWriter: w}
 		} else {
-			http1 := &http1TunnelWriter{ResponseWriter: w}
-			defer http1.closeHijacked()
-			responseWriter = http1
+			owned := &http1TunnelWriter{ResponseWriter: w}
+			responseWriter = owned
+			defer func() {
+				if owned.hijacked != nil {
+					// goproxy returns after either WebSocket copy exits but
+					// leaves both ends open. Closing the tunnel also wakes
+					// the one-connection listener and cancels its context.
+					owned.closeHijacked()
+					if capture.response != nil && capture.response.Body != nil {
+						_ = capture.response.Body.Close()
+					}
+				}
+			}()
 		}
 		proxy.ServeHTTP(responseWriter, forward)
 		if capture.response != nil {
@@ -102,7 +112,7 @@ func serveCursorTLS(serverCtx context.Context, proxy *goproxy.ProxyHttpServer, t
 			}
 		}
 	})
-	base := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return serverCtx }}
+	base := &http.Server{Handler: handler, ReadHeaderTimeout: 30 * time.Second, BaseContext: func(net.Listener) context.Context { return serverCtx }, DisableGeneralOptionsHandler: true}
 	if state.NegotiatedProtocol == http2.NextProtoTLS {
 		(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{Context: serverCtx, BaseConfig: base, Handler: handler})
 		return

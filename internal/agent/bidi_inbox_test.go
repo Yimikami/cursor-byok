@@ -115,7 +115,7 @@ func TestBidiPayloadBinaryAndHexAreUnambiguous(t *testing.T) {
 		t.Fatalf("hex %x %v", b, err)
 	}
 	bidi.Data = ""
-	bidi.ProtoReflect().SetUnknown(wireBytes(nil, 4, []byte{3, 4}))
+	bidi.DataBinary = []byte{3, 4}
 	b, err = decodeBidiPayload(bidi)
 	if err != nil || string(b) != "\x03\x04" {
 		t.Fatalf("binary %x %v", b, err)

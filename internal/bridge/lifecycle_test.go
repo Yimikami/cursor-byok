@@ -95,8 +95,8 @@ func TestStartProxyRollsBackEachFailedStep(t *testing.T) {
 		{"listen", []string{"create", "listen"}},
 		{"settings", []string{"create", "listen", "settings", "restore-settings", "close"}},
 		{"auth", []string{"create", "listen", "settings", "auth", "restore-settings", "restore-auth", "close"}},
-		{"model", []string{"create", "listen", "settings", "auth", "model", "restore-settings", "restore-model", "restore-auth", "close"}},
-		{"proxy", []string{"create", "listen", "settings", "auth", "model", "proxy", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}},
+		{"model", []string{"create", "listen", "settings", "auth", "proxy", "model", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}},
+		{"proxy", []string{"create", "listen", "settings", "auth", "proxy", "restore-proxy", "restore-settings", "restore-auth", "close"}},
 	} {
 		t.Run(tt.step, func(t *testing.T) {
 			s, events, failures := testLifecycle(t)
@@ -181,7 +181,7 @@ func TestStartAfterFailedStopRecoversThenReappliesRouting(t *testing.T) {
 			if failure == "restore-proxy" {
 				want = append(want, "close")
 			}
-			want = append(want, "create", "listen", "settings", "auth", "model", "proxy")
+			want = append(want, "create", "listen", "settings", "auth", "proxy", "model")
 			if err != nil || !state.Running || s.recoveryPending || !reflect.DeepEqual(*events, want) {
 				t.Fatalf("did not reapply routing after recovery: state=%+v err=%v events=%v", state, err, *events)
 			}
@@ -224,7 +224,7 @@ func TestSuccessfulLifecycleNotifiesOutsideLock(t *testing.T) {
 	if _, err := s.StopProxy(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "listen", "settings", "auth", "model", "proxy", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}
+	want := []string{"create", "listen", "settings", "auth", "proxy", "model", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}
 	if !reflect.DeepEqual(*events, want) || !reflect.DeepEqual(notified, []bool{true, false}) {
 		t.Fatalf("events=%v notified=%v", *events, notified)
 	}
@@ -298,7 +298,7 @@ func TestStartRetriesPendingRecoveryBeforeNewOverrides(t *testing.T) {
 	delete(failures, "restore-proxy")
 	*events = nil
 	state, err = s.StartProxy()
-	want = append(want, "create", "listen", "settings", "auth", "model", "proxy")
+	want = append(want, "create", "listen", "settings", "auth", "proxy", "model")
 	if err != nil || !state.Running || s.recoveryPending || !reflect.DeepEqual(*events, want) {
 		t.Fatalf("state=%+v err=%v pending=%v events=%v", state, err, s.recoveryPending, *events)
 	}

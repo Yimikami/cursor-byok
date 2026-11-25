@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 )
@@ -22,6 +23,9 @@ func TestInferenceAnthropicPreservesSignedToolTurn(t *testing.T) {
 				map[string]any{"type": "text", "text": "checking"},
 				map[string]any{"type": "redacted_thinking", "data": "opaque-redacted-data"},
 				map[string]any{"type": "tool_use", "id": "toolu_signed", "name": "Read", "input": map[string]any{"path": "a.txt"}},
+			}
+			if native {
+				expected[0].(map[string]any)["future"] = map[string]any{"v": float64(1)}
 			}
 			var calls atomic.Int32
 			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +43,7 @@ func TestInferenceAnthropicPreservesSignedToolTurn(t *testing.T) {
 				w.Header().Set("Content-Type", "text/event-stream")
 				if call == 1 {
 					events := []string{
-						`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"first\n","signature":""}}`,
+						`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"first\n","signature":"","future":{"v":1}}}`,
 						`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"thought"}}`,
 						`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-part-one"}}`,
 						`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"-two"}}`,
@@ -99,7 +103,11 @@ func TestInferenceAnthropicPreservesSignedToolTurn(t *testing.T) {
 			}
 			for _, field := range fields {
 				if field.number == 10 {
-					assistant = append(assistant, providerProtoVarint(16, field.value)...)
+					if field.kind == protowire.BytesType {
+						assistant = append(assistant, providerProtoBytes(16, field.data)...)
+					} else {
+						assistant = append(assistant, providerProtoVarint(16, field.value)...)
+					}
 				}
 				if field.number == 11 {
 					assistant = append(assistant, providerProtoBytes(17, field.data)...)
@@ -166,7 +174,7 @@ func TestInferenceAnthropicFallbackPreservesEmptyFieldsAndPackedOrder(t *testing
 		t.Fatal(err)
 	}
 	var blocks []map[string]any
-	if err := json.Unmarshal(messages[0].AnthropicContent, &blocks); err != nil {
+	if err := json.Unmarshal(messages[0].AnthropicNativeContent, &blocks); err != nil {
 		t.Fatal(err)
 	}
 	if len(blocks) != 2 || blocks[0]["thinking"] != "" || blocks[0]["signature"] != "signature" || blocks[1]["text"] != "" {
@@ -183,7 +191,7 @@ func TestInferenceAnthropicFallbackPreservesEmptyFieldsAndPackedOrder(t *testing
 	}
 	var openAI map[string]any
 	_ = json.Unmarshal(encoded, &openAI)
-	if _, exists := openAI["AnthropicContent"]; exists {
+	if _, exists := openAI["AnthropicNativeContent"]; exists {
 		t.Fatal("private Anthropic replay metadata leaked into OpenAI JSON")
 	}
 }

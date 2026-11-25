@@ -34,5 +34,12 @@ func matchesAccessTokenAt(ctx context.Context, path, token string) bool {
 	if err = db.QueryRowContext(ctx, "SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/accessToken").Scan(&current); err != nil {
 		return false
 	}
-	return current != "" && subtle.ConstantTimeCompare([]byte(token), []byte(current)) == 1
+	// Cursor stores Windows credentials in safeStorage but sends the decrypted
+	// token on requests. Identify it in memory; ciphertext or unavailable crypto
+	// must never authorize a local provider call, including a migrated fake.
+	current, err = decodeCursorAuthToken(path, current)
+	if err != nil || ctx.Err() != nil || IsLocalSessionToken(current) {
+		return false
+	}
+	return strings.TrimSpace(current) != "" && subtle.ConstantTimeCompare([]byte(token), []byte(current)) == 1
 }

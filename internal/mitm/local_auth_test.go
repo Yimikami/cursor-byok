@@ -10,8 +10,46 @@ import (
 	"testing"
 	"time"
 
+	"cursor-byok/internal/certs"
 	"github.com/coder/websocket"
 )
+
+func TestProductionLocalRoutesRejectMissingAccount(t *testing.T) {
+	// Missing/malformed Authorization must fail before reading any account
+	// database or request payload. Do not use the permissive fixture factory.
+	ca, err := certs.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New("127.0.0.1:0", ca, nil, nil, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Stop(context.Background())
+	for _, path := range []string{
+		"/agent.v1.AgentService/RunSSE",
+		"/aiserver.v1.InferenceService/RunInferenceSSE",
+		"/aiserver.v1.AiService/StreamBugBotAgenticSSE",
+		"/aiserver.v1.AiService/StreamCpp",
+		"/aiserver.v1.BidiService/BidiAppend",
+		"/aiserver.v1.AiService/NameTab",
+		"/aiserver.v1.AiService/WriteGitBranchName",
+		"/aiserver.v1.AiService/WriteGitCommitMessage",
+	} {
+		for _, values := range [][]string{nil, {"Basic invalid"}, {"Bearer"}, {"Bearer one", "Bearer two"}} {
+			req := httptest.NewRequest(http.MethodPost, "https://api2.cursor.sh"+path, nil)
+			req.Body = io.NopCloser(failRead{t})
+			for _, value := range values {
+				req.Header.Add("Authorization", value)
+			}
+			rec := httptest.NewRecorder()
+			server.srv.Handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("%s accepted missing/malformed account: status=%d", path, rec.Code)
+			}
+		}
+	}
+}
 
 func testOwnerAuthorization(_ context.Context, h http.Header) bool {
 	return len(h.Values("Authorization")) == 1 && h.Get("Authorization") == "Bearer fixture-owner"
@@ -26,7 +64,7 @@ func TestPaidRoutesRequireOwnerBeforeReadingOrProvider(t *testing.T) {
 	}))
 	defer provider.Close()
 	_, client := testProxyWithAuthorizer(t, provider.URL, testOwnerAuthorization)
-	for _, path := range []string{"/agent.v1.AgentService/RunSSE", "/aiserver.v1.InferenceService/RunInferenceSSE", "/aiserver.v1.AiService/StreamBugBotAgenticSSE", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName", "/aiserver.v1.AiService/WriteGitCommitMessage"} {
+	for _, path := range []string{"/aiserver.v1.AiService/StreamCpp", "/aiserver.v1.BidiService/BidiAppend", "/agent.v1.AgentService/RunSSE", "/aiserver.v1.InferenceService/RunInferenceSSE", "/aiserver.v1.AiService/StreamBugBotAgenticSSE", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName", "/aiserver.v1.AiService/WriteGitCommitMessage"} {
 		for _, token := range []string{"", "Bearer other-account"} {
 			req, _ := http.NewRequest("POST", "https://api2.cursor.sh"+path, bytes.NewBufferString("not protobuf"))
 			if token != "" {

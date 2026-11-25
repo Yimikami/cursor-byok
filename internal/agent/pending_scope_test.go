@@ -65,11 +65,11 @@ func TestPendingResultsAreScopedToEachRun(t *testing.T) {
 	}
 	// Providers can reuse tool-call ids in different conversations, and wire
 	// ids are client supplied. Neither may overwrite another run's waiter.
-	toolA, toolB := registerToolWait(a, "same-tool"), registerToolWait(b, "same-tool")
-	t.Cleanup(func() { releaseToolWait(toolA); releaseToolWait(toolB) })
-	registerExecIDAlias(a, "same-exec", 77, "same-tool")
-	registerExecIDAlias(b, "same-exec", 77, "same-tool")
-	interactionA, interactionB := registerInteractionWait(a, 88), registerInteractionWait(b, 88)
+	toolA, toolB := registerToolWait(bidiToolScope(a), "same-tool"), registerToolWait(bidiToolScope(b), "same-tool")
+	t.Cleanup(func() { cancelToolWait(toolA); cancelToolWait(toolB) })
+	registerExecIDAlias(bidiToolScope(a), "same-exec", 77, "same-tool")
+	registerExecIDAlias(bidiToolScope(b), "same-exec", 77, "same-tool")
+	interactionA, interactionB := registerInteractionWait(bidiToolScope(a), 88), registerInteractionWait(bidiToolScope(b), 88)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -129,7 +129,7 @@ func TestPendingResultsAreScopedToEachRun(t *testing.T) {
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
 	for _, owner := range []string{a, b} {
-		if pending[toolWaitKey{owner, "same-tool"}] != nil || execIDAlias[toolWaitKey{owner, "same-exec"}] != "" || seqAlias[sequenceWaitKey{owner, 77}] != "" {
+		if pending[toolWaitKey{bidiToolScope(owner), "same-tool"}] != nil || execIDAlias[toolWaitKey{bidiToolScope(owner), "same-exec"}] != (toolWaitKey{}) || seqAlias[sequenceWaitKey{bidiToolScope(owner), 77}] != (toolWaitKey{}) {
 			t.Fatal("completed waiter retained aliases")
 		}
 	}
@@ -137,20 +137,20 @@ func TestPendingResultsAreScopedToEachRun(t *testing.T) {
 
 func TestLateAndForeignShellEventsDoNotAllocateBuffers(t *testing.T) {
 	const owner = "late-shell-owner"
-	ch := registerToolWait(owner, "shell-tool")
-	defer releaseToolWait(ch)
-	registerExecIDAlias(owner, "shell-exec", 91, "shell-tool")
+	ch := registerToolWait(bidiToolScope(owner), "shell-tool")
+	defer cancelToolWait(ch)
+	registerExecIDAlias(bidiToolScope(owner), "shell-exec", 91, "shell-tool")
 	msg := &agentv1.AgentClientMessage{Message: &agentv1.AgentClientMessage_ExecClientMessage{ExecClientMessage: &agentv1.ExecClientMessage{Id: 91, Message: &agentv1.ExecClientMessage_ShellStream{ShellStream: &agentv1.ShellStream{Event: &agentv1.ShellStream_Stdout{Stdout: &agentv1.ShellStreamStdout{Data: "output"}}}}}}}
-	routeExecClientResult("foreign-owner", msg)
+	routeExecClientResult(bidiToolScope("foreign-owner"), msg)
 	pendingMu.Lock()
-	foreign := shellAccum[sequenceWaitKey{"foreign-owner", 91}]
+	foreign := shellAccum[sequenceWaitKey{bidiToolScope("foreign-owner"), 91}]
 	pendingMu.Unlock()
 	if foreign != nil {
 		t.Fatal("foreign event allocated shell buffer")
 	}
-	routeExecClientResult(owner, msg)
+	routeExecClientResult(bidiToolScope(owner), msg)
 	pendingMu.Lock()
-	state := shellAccum[sequenceWaitKey{owner, 91}]
+	state := shellAccum[sequenceWaitKey{bidiToolScope(owner), 91}]
 	pendingMu.Unlock()
 	if state == nil || string(state.Stdout) != "output" {
 		t.Fatal("active shell output was lost")
@@ -160,11 +160,11 @@ func TestLateAndForeignShellEventsDoNotAllocateBuffers(t *testing.T) {
 	_ = waitForToolResultContext(ctx, ch, time.Hour)
 	// Commands may continue producing output after the foreground timeout.
 	for i := 0; i < 10; i++ {
-		routeExecClientResult(owner, msg)
+		routeExecClientResult(bidiToolScope(owner), msg)
 	}
 	pendingMu.Lock()
 	defer pendingMu.Unlock()
-	if shellAccum[sequenceWaitKey{owner, 91}] != nil {
+	if shellAccum[sequenceWaitKey{bidiToolScope(owner), 91}] != nil {
 		t.Fatal("late output recreated a discarded buffer")
 	}
 }

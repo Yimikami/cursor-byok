@@ -25,6 +25,9 @@ type openAIRequest struct {
 	MaxTokens       int               `json:"max_tokens,omitempty"`
 	ReasoningEffort string            `json:"reasoning_effort,omitempty"`
 	ServiceTier     string            `json:"service_tier,omitempty"`
+	Temperature     *float32          `json:"temperature,omitempty"`
+	TopP            *float32          `json:"top_p,omitempty"`
+	Stop            []string          `json:"stop,omitempty"`
 }
 
 type openAIStreamOpts struct {
@@ -39,14 +42,14 @@ type openAIStreamOpts struct {
 // Content can be a plain string OR a multipart array (for images).
 // We use json.RawMessage so the marshaller emits whichever form we set.
 type openAIMessage struct {
-	Role       string              `json:"role"`
-	Content    json.RawMessage     `json:"content,omitempty"`
-	ToolCallID string              `json:"tool_call_id,omitempty"`
-	Name       string              `json:"name,omitempty"`
-	ToolCalls  []openAIToolCallMsg `json:"tool_calls,omitempty"`
-	// Private provider replay metadata; never leak Anthropic blocks into an
-	// OpenAI-compatible request's JSON.
-	AnthropicContent json.RawMessage `json:"-"`
+	Role                   string                  `json:"role"`
+	Content                json.RawMessage         `json:"content,omitempty"`
+	ToolCallID             string                  `json:"tool_call_id,omitempty"`
+	Name                   string                  `json:"name,omitempty"`
+	ToolCalls              []openAIToolCallMsg     `json:"tool_calls,omitempty"`
+	ReasoningContent       string                  `json:"reasoning_content,omitempty"`
+	ReasoningParts         []providerReasoningPart `json:"-"`
+	AnthropicNativeContent json.RawMessage         `json:"-"`
 }
 
 func textMessage(role, text string) openAIMessage {
@@ -145,12 +148,13 @@ type openAIDelta func(content string, reasoning string, done bool) error
 // "tool_calls", "length", etc.) so the agent loop knows whether to expect
 // another round after running the tools.
 type streamResult struct {
-	RequestBody      []byte
-	SSERaw           []byte
-	ToolCalls        []PendingToolCall
-	FinishReason     string
-	Usage            *openAIUsage
-	AnthropicContent json.RawMessage
+	RequestBody            []byte
+	SSERaw                 []byte
+	ToolCalls              []PendingToolCall
+	FinishReason           string
+	Usage                  *openAIUsage
+	ReasoningParts         []providerReasoningPart
+	AnthropicNativeContent json.RawMessage
 }
 
 // streamOpenAI sends a chat-completion request to baseURL and invokes onDelta
@@ -186,6 +190,9 @@ func streamOpenAI(
 		Messages:      messages,
 		Tools:         tools,
 		StreamOptions: &openAIStreamOpts{IncludeUsage: true},
+		Temperature:   opts.Temperature,
+		TopP:          opts.TopP,
+		Stop:          opts.StopSequences,
 	}
 	if effort := normalizeReasoningEffort(opts.ReasoningEffort); effort != "" {
 		req.ReasoningEffort = effort
@@ -222,6 +229,12 @@ func streamOpenAI(
 		return nil, err
 	}
 	result := &streamResult{RequestBody: body}
+	var reasoning strings.Builder
+	defer func() {
+		if reasoning.Len() > 0 {
+			result.ReasoningParts = []providerReasoningPart{{Text: reasoning.String(), ModelName: model}}
+		}
+	}()
 	// Per-choice accumulators keyed by tool_call index. OpenAI streams a
 	// tool_call across many chunks — first a chunk with the id+name+type,
 	// then N chunks appending fragments of the JSON arguments string. We
@@ -275,6 +288,7 @@ func streamOpenAI(
 			result.Usage = chunk.Usage
 		}
 		for _, c := range chunk.Choices {
+			reasoning.WriteString(c.Delta.Reasoning)
 			if c.Delta.Content != "" || c.Delta.Reasoning != "" {
 				if err := onDelta(c.Delta.Content, c.Delta.Reasoning, false); err != nil {
 					result.SSERaw = sseBuf.Bytes()
@@ -364,7 +378,8 @@ var validReasoningEfforts = map[string]string{
 	"medium":  "medium",
 	"high":    "high",
 	"xhigh":   "xhigh",
-	"none":    "low",
+	"none":    "none",
+	"minimal": "minimal",
 	"extreme": "xhigh",
 	"max":     "xhigh",
 }

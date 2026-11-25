@@ -185,7 +185,7 @@ func ForceModelSelection(byokHexID string, backupPaths ...string) error {
 		if err != nil {
 			return err
 		}
-		path = filepath.Join(dir, "cursor-model-backup.json")
+		path = filepath.Join(dir, ProfileBackupName("cursor-model-backup.json"))
 	}
 	return forceModelSelectionAt(stateDBPath(), path, byokHexID, byokHexID)
 }
@@ -211,6 +211,14 @@ func clearLegacyCloudModelPin(d map[string]any, knownAdapterIDs []string) {
 	if !known {
 		return
 	}
+	// Require the prior local composer pin too, so a deliberate cloud-only
+	// setting is not misclassified as the old application's global override.
+	ai, _ := d["aiSettings"].(map[string]any)
+	models, _ := ai["modelConfig"].(map[string]any)
+	composer, _ := models["composer"].(map[string]any)
+	if composer["modelName"] != id {
+		return
+	}
 	for _, key := range []string{"fallbackModels", "bestOfNDefaultModels"} {
 		models, ok := cloud[key].([]any)
 		if !ok || len(models) != 1 || models[0] != id {
@@ -226,6 +234,9 @@ func clearLegacyCloudModelPin(d map[string]any, knownAdapterIDs []string) {
 }
 
 func forceModelSelectionAt(dbPath, backupPath, byokHexID string, knownAdapterIDs ...string) error {
+	if len(knownAdapterIDs) == 0 {
+		knownAdapterIDs = []string{byokHexID}
+	}
 	if byokHexID == "" {
 		return nil
 	}
