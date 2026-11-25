@@ -1,10 +1,10 @@
 {
 	"fixed": {
-		"file_version": "1.0.1"
+		"file_version": "1.1.0"
 	},
 	"info": {
 		"0000": {
-			"ProductVersion": "1.0.1",
+			"ProductVersion": "1.1.0",
 			"CompanyName": "cursor-byok",
 			"FileDescription": "cursor-byok - Local MITM proxy & BYOK gateway for Cursor IDE",
 			"LegalCopyright": "© 2026 cursor-byok",
