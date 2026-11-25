@@ -67,11 +67,12 @@ func shouldMITMHost(host string) bool {
 }
 
 type Server struct {
-	addr   string
-	srv    *http.Server
-	ln     net.Listener
-	gw     *relay.Gateway
-	cancel context.CancelFunc
+	addr        string
+	srv         *http.Server
+	ln          net.Listener
+	gw          *relay.Gateway
+	cancel      context.CancelFunc
+	connections *connectionTracker
 }
 
 // agentResolver lets the agent package fetch the user's first BYOK adapter
@@ -107,8 +108,8 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 	bidiRoutes := newBidiRouteRegistry()
 	context.AfterFunc(serverCtx, bidiRoutes.close)
 	p := goproxy.NewProxyHttpServer()
-	// CONNECT has a separate environment-derived dialer from Transport.Proxy.
-	// A system proxy pointing back here must never recursively tunnel to itself.
+	// CONNECT has its own environment-derived dialer, independent of
+	// Transport.Proxy. Never send system-proxy tunnels back to ourselves.
 	p.ConnectDial = nil
 	// goproxy defaults to skipping upstream certificate verification. Native
 	// requests now carry the user's real account credentials, so validate the
@@ -194,6 +195,9 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		if req.URL == nil {
 			return req, makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"invalid request URL"}`)
 		}
+		if isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
+			return req, makeJSONResp(req, http.StatusForbidden, `{"code":"permission_denied","message":"BYOK requests must originate from the Cursor desktop application"}`)
+		}
 		if debug {
 			log.Printf("[REQ] %s %s%s (CT: %s)", req.Method, req.URL.Host, req.URL.Path, req.Header.Get("Content-Type"))
 		}
@@ -273,6 +277,15 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 			if path == "/aiserver.v1.InferenceService/RunInferenceSSE" {
 				return req, handleInferenceSSE(req, serverCtx, resolver)
 			}
+			if path == "/aiserver.v1.CppService/AvailableModels" {
+				return req, handleAvailableCppModels(req, resolver)
+			}
+			if path == "/aiserver.v1.AiService/CppConfig" {
+				return req, handleCppConfig(req, resolver)
+			}
+			if path == "/aiserver.v1.AiService/StreamCpp" {
+				return req, handleStreamCpp(req, serverCtx, resolver, selectedModel("tab"))
+			}
 			if path == "/aiserver.v1.AiService/NameTab" {
 				return req, handleNativeText(req, resolver, "")
 			}
@@ -307,14 +320,23 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		if gw != nil {
 			gw.MaybeRewriteResponse(req, resp)
 		}
+		if req != nil && req.URL != nil && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) {
+			applyNativeCORS(req, resp)
+		}
 		return resp
 	})
 
+	connections := &connectionTracker{connections: make(map[*trackedConnection]http.ConnState)}
 	return &Server{
-		addr:   addr,
-		cancel: cancel,
-		gw:     gw,
-		srv:    &http.Server{Handler: p, ReadHeaderTimeout: 30 * time.Second},
+		addr:        addr,
+		cancel:      cancel,
+		gw:          gw,
+		connections: connections,
+		srv: &http.Server{
+			Handler: p, ReadHeaderTimeout: 30 * time.Second,
+			BaseContext: func(net.Listener) context.Context { return serverCtx },
+			ConnState:   connections.stateChanged,
+		},
 	}, nil
 }
 
@@ -472,11 +494,11 @@ func handleBackgroundComposerStatus(req *http.Request) *http.Response {
 // raw transport here is decoupled from any Connect envelope/compression
 // the inner protobuf might also carry — that's still done by the agent
 // package via decodeUnary.
-const maxLocalRequestBody = 32 << 20
-
 func readDecodedBody(req *http.Request) ([]byte, error) {
-	return readDecodedBodyLimit(req, maxLocalRequestBody)
+	return readDecodedBodyLimit(req, 32<<20)
 }
+
+var errRequestBodyTooLarge = errors.New("request body exceeds size limit")
 
 func readDecodedBodyLimit(req *http.Request, limit int64) ([]byte, error) {
 	if req.Body == nil {
@@ -484,12 +506,16 @@ func readDecodedBodyLimit(req *http.Request, limit int64) ([]byte, error) {
 	}
 	defer req.Body.Close()
 	if req.ContentLength > limit {
-		return nil, errors.New("request body too large")
+		return nil, errRequestBodyTooLarge
 	}
-	raw, err := io.ReadAll(io.LimitReader(req.Body, limit+1))
-	if int64(len(raw)) > limit {
-		return nil, errors.New("request body too large")
+	read := func(r io.Reader) ([]byte, error) {
+		data, err := io.ReadAll(io.LimitReader(r, limit+1))
+		if int64(len(data)) > limit {
+			return nil, errRequestBodyTooLarge
+		}
+		return data, err
 	}
+	raw, err := read(req.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -500,10 +526,7 @@ func readDecodedBodyLimit(req *http.Request, limit int64) ([]byte, error) {
 			return nil, gerr
 		}
 		defer zr.Close()
-		out, rerr := io.ReadAll(io.LimitReader(zr, limit+1))
-		if int64(len(out)) > limit {
-			return nil, errors.New("decoded request body too large")
-		}
+		out, rerr := read(zr)
 		if rerr != nil {
 			return nil, rerr
 		}
@@ -531,6 +554,9 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	if s.connections != nil {
+		ln = &trackedListener{Listener: ln, tracker: s.connections}
+	}
 	s.ln = ln
 	go func() { _ = s.srv.Serve(ln) }()
 	return nil
@@ -543,7 +569,14 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.srv == nil {
 		return nil
 	}
+	// Hijacked CONNECT tunnels and speculative sockets are outside
+	// net/http's graceful shutdown bookkeeping.
+	connectionErr := s.connections.closeConnections(false)
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	return s.srv.Shutdown(ctx)
+	if err := s.srv.Shutdown(ctx); err != nil {
+		closeErr := s.srv.Close()
+		return errors.Join(connectionErr, closeErr, s.connections.closeConnections(true))
+	}
+	return errors.Join(connectionErr, s.connections.closeConnections(true))
 }

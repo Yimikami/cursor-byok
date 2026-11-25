@@ -2,6 +2,7 @@ package mitm
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 
@@ -9,8 +10,11 @@ import (
 )
 
 func handleNativeText(req *http.Request, resolver agent.AdapterResolver, selectedModel string) *http.Response {
-	body, err := readDecodedBody(req)
+	body, err := readDecodedBodyLimit(req, 1<<20)
 	if err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			return makeJSONResp(req, http.StatusRequestEntityTooLarge, `{"code":"resource_exhausted","message":"native text request exceeds 1 MiB"}`)
+		}
 		return makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"could not read native text request"}`)
 	}
 	result := agent.HandleNativeText(req.Context(), req.URL.Path, body, req.Header.Get("Content-Type"), resolver, selectedModel)

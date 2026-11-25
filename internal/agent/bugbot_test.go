@@ -41,7 +41,7 @@ func TestBugBotContinuesAfterToolPreamble(t *testing.T) {
 		_ = delta("[]", "", false)
 		return &streamResult{FinishReason: "stop"}, nil
 	}
-	response, err := runBugBotReview(context.Background(), &Session{RequestID: "review-test", BugBotRequest: &aiserverv1.StreamBugBotRequest{}, UserText: "Review +change"}, "", "", "model", AdapterOpts{}, stream, io.Discard)
+	response, err := runBugBotReview(context.Background(), "review-test", &Session{RequestID: "review-test", BugBotRequest: &aiserverv1.StreamBugBotRequest{}, UserText: "Review +change"}, "", "", "model", AdapterOpts{}, stream, io.Discard)
 	if err != nil || rounds != 2 || response.GetStatus().GetStatus() != aiserverv1.BugBotStatus_STATUS_DONE || len(response.GetBugReports().GetBugReports()) != 0 {
 		t.Fatalf("review response=%v rounds=%d err=%v", response, rounds, err)
 	}
@@ -52,7 +52,7 @@ func TestBugBotRejectsEmptyOrFailedProvider(t *testing.T) {
 		stream := func(context.Context, string, string, string, []openAIMessage, []openAITool, AdapterOpts, openAIDelta) (*streamResult, error) {
 			return result, nil
 		}
-		response, err := runBugBotReview(context.Background(), &Session{BugBotRequest: &aiserverv1.StreamBugBotRequest{}}, "", "", "model", AdapterOpts{}, stream, io.Discard)
+		response, err := runBugBotReview(context.Background(), "review-test", &Session{BugBotRequest: &aiserverv1.StreamBugBotRequest{}}, "", "", "model", AdapterOpts{}, stream, io.Discard)
 		if err == nil || response != nil {
 			t.Fatalf("failed review marked done: %v err=%v", response, err)
 		}
@@ -67,7 +67,7 @@ func TestBugBotRejectsTokenLimitedReviewEvenWithValidJSON(t *testing.T) {
 					_ = delta(answer, "", false)
 					return &streamResult{FinishReason: reason}, nil
 				}
-				response, err := runBugBotReview(context.Background(), &Session{BugBotRequest: &aiserverv1.StreamBugBotRequest{}}, "", "", "model", AdapterOpts{}, stream, io.Discard)
+				response, err := runBugBotReview(context.Background(), t.Name(), &Session{BugBotRequest: &aiserverv1.StreamBugBotRequest{}}, "", "", "model", AdapterOpts{}, stream, io.Discard)
 				if err == nil || !strings.Contains(err.Error(), "output limit") || response != nil {
 					t.Fatalf("truncated review marked complete: response=%v err=%v", response, err)
 				}

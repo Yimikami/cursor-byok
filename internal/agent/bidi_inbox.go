@@ -33,6 +33,7 @@ type bidiInbox struct {
 	nextSeq  int64
 	notify   chan struct{}
 	closed   bool
+	claimed  bool
 	touched  time.Time
 	store    *bidiInboxStore
 }
@@ -88,13 +89,7 @@ func newBidiInboxStore() *bidiInboxStore {
 }
 
 func decodeBidiPayload(bidi *aiserv1.BidiAppendRequest) ([]byte, error) {
-	// data_binary is field 4 in Cursor 3.32.4. It is newer than the checked-in
-	// generated proto, so read its unknown field without regenerating the
-	// unrelated, very large aiserver schema.
-	binary, err := inferenceBytes(bidi.ProtoReflect().GetUnknown(), 4)
-	if err != nil {
-		return nil, err
-	}
+	binary := bidi.GetDataBinary()
 	if binary != nil && bidi.GetData() != "" {
 		return nil, errors.New("BidiAppend has both binary and hex data")
 	}
@@ -180,17 +175,22 @@ func (s *bidiInboxStore) claim(owner, protocol string) (*bidiInbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	if in.protocol != "" || in.closed {
-		if !in.closed || in.protocol != protocol || (protocol != "agent" && protocol != "bugbot") {
-			return nil, errors.New("bidi request_id already belongs to a stream")
+	if in.claimed || (in.protocol != "" && in.protocol != protocol) {
+		return nil, errors.New("bidi request_id already belongs to a stream")
+	}
+	if in.closed {
+		if protocol != "agent" && protocol != "bugbot" {
+			return nil, errors.New("inference resumption is not supported")
 		}
-		// Legacy SSE retries recover the conversation from the session store.
-		// Use a new attachment so an old pump/release can never touch it, while
-		// preserving the watermark that makes retransmitted appends idempotent.
+		// Legacy streams recover state from the session store and reconnect
+		// at their consumed watermark. A separate lease prevents delayed cleanup
+		// from the old stream from closing the new attachment.
 		in = &bidiInbox{owner: owner, protocol: protocol, nextSeq: in.nextSeq, queue: make(map[int64][]byte), notify: make(chan struct{}, 1), store: s}
 		s.entries[owner] = in
 	}
 	in.protocol = protocol
+	in.claimed = true
+	in.closed = false
 	in.touched = time.Now()
 	return in, nil
 }
@@ -225,11 +225,15 @@ func (in *bidiInbox) next(ctx context.Context) ([]byte, error) {
 func (in *bidiInbox) release() {
 	in.store.mu.Lock()
 	defer in.store.mu.Unlock()
+	if in.store.entries[in.owner] != in {
+		return
+	}
 	for seq, data := range in.queue {
 		in.store.queuedBytes -= len(data)
 		delete(in.queue, seq)
 	}
 	in.closed = true
+	in.claimed = false
 	in.touched = time.Now()
 	select {
 	case in.notify <- struct{}{}:

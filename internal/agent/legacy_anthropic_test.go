@@ -69,7 +69,7 @@ func TestLegacyAnthropicToolLoopsPreserveSignedContent(t *testing.T) {
 					return []AdapterTarget{{ProviderType: "anthropic", BaseURL: provider.URL, APIKey: "test-key", Model: "claude-test", Opts: opts}}
 				})
 			} else {
-				response, err := runBugBotReview(ctx, session, provider.URL, "test-key", "claude-test", opts, streamAnthropic, io.Discard)
+				response, err := runBugBotReview(ctx, session.RequestID, session, provider.URL, "test-key", "claude-test", opts, streamAnthropic, io.Discard)
 				if err != nil || response.GetStatus().GetStatus() != aiserverv1.BugBotStatus_STATUS_DONE {
 					t.Fatalf("review did not finish: response=%v err=%v", response, err)
 				}
@@ -84,7 +84,9 @@ func TestLegacyAnthropicToolLoopsPreserveSignedContent(t *testing.T) {
 func TestLegacyAnthropicHistoryReplaysStoredSignedContent(t *testing.T) {
 	native := json.RawMessage(`[{"type":"thinking","thinking":"","signature":"history-signature"},{"type":"redacted_thinking","data":"history-opaque"},{"type":"text","text":"saved"},{"type":"tool_use","id":"history-tool","name":"Read","input":{"path":"a.txt"}}]`)
 	original := textMessage("assistant", "saved")
-	original.AnthropicContent = native
+	original.AnthropicNativeContent = native
+	original.ReasoningContent = "stored reasoning"
+	original.ReasoningParts = []providerReasoningPart{{Text: "stored reasoning", Signature: "signature", LineageTag: "lineage"}}
 	original.ToolCalls = []openAIToolCallMsg{{ID: "history-tool", Type: "function", Function: openAIToolCallFn{Name: "Read", Arguments: `{"path":"a.txt"}`}}}
 	saved, err := json.Marshal(openAIToStored(original))
 	if err != nil {
@@ -95,6 +97,9 @@ func TestLegacyAnthropicHistoryReplaysStoredSignedContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	restored := storedToOpenAI(stored)
+	if restored.ReasoningContent != original.ReasoningContent || !reflect.DeepEqual(restored.ReasoningParts, original.ReasoningParts) {
+		t.Fatal("stored reasoning metadata changed")
+	}
 	_, messages, err := convertMessagesToAnthropic([]openAIMessage{restored, toolResultMessage("history-tool", "Read", "file content")})
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +121,7 @@ func TestLegacyAnthropicHistoryReplaysStoredSignedContent(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"role":"assistant","content":"old history"}`), &old); err != nil {
 		t.Fatal(err)
 	}
-	if got := storedToOpenAI(old); len(got.AnthropicContent) != 0 || string(got.Content) != `"old history"` {
+	if got := storedToOpenAI(old); len(got.AnthropicNativeContent) != 0 || string(got.Content) != `"old history"` {
 		t.Fatalf("legacy history no longer loads: %+v", got)
 	}
 }

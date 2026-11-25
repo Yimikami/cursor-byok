@@ -7,6 +7,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	agentv1 "cursor-byok/internal/protocodec/gen/agent/v1"
 )
 
 // native_tools.json was copied verbatim from the working app's captured
@@ -81,14 +83,15 @@ func openAIToolsForRequest(sess *Session) []openAITool {
 		if _, ok := mvpToolAllowlist[meta.Name]; !ok {
 			continue
 		}
+		if !toolAllowedInMode(sess, meta.Name) {
+			continue
+		}
 		out = append(out, openAITool{Type: "function", Function: t.Function})
 	}
 	if sess == nil {
 		return out
 	}
-	if sess.McpMap == nil {
-		sess.McpMap = map[string]*McpRef{}
-	}
+	sess.McpMap = map[string]*McpRef{}
 	type mcpEntry struct {
 		serverName string
 		serverID   string
@@ -97,7 +100,11 @@ func openAIToolsForRequest(sess *Session) []openAITool {
 		schema     json.RawMessage
 	}
 	var collected []mcpEntry
-	seen := map[string]bool{}
+	seen := map[string]int{}
+	hasSchema := func(raw json.RawMessage) bool {
+		var schema map[string]any
+		return json.Unmarshal(raw, &schema) == nil && len(schema) > 0
+	}
 	add := func(serverName, serverID, tool, desc string, schema json.RawMessage) {
 		if serverID == "" && serverName == "" {
 			return
@@ -112,59 +119,76 @@ func openAIToolsForRequest(sess *Session) []openAITool {
 			serverName = serverID
 		}
 		key := serverID + "\x00" + tool
-		if seen[key] {
+		if index, exists := seen[key]; exists {
+			// Sources are visited newest/request-specific first. A fallback
+			// may fill missing metadata, but cannot replace its complete schema.
+			entry := &collected[index]
+			if !hasSchema(entry.schema) && hasSchema(schema) {
+				entry.schema = schema
+			}
+			if entry.desc == "" {
+				entry.desc = desc
+			}
+			if entry.serverName == entry.serverID && serverName != serverID {
+				entry.serverName = serverName
+			}
 			return
 		}
-		seen[key] = true
+		seen[key] = len(collected)
 		collected = append(collected, mcpEntry{serverName: serverName, serverID: serverID, tool: tool, desc: desc, schema: schema})
 	}
-	// Source 1: AgentRunRequest.McpTools (rich form with input schema). The
-	// McpToolDefinition only exposes provider_identifier; there's no short
-	// server_name here, so we reuse the id for both fields.
-	if sess.Run != nil {
-		if mcpTools := sess.Run.GetMcpTools(); mcpTools != nil {
-			for _, d := range mcpTools.GetMcpTools() {
-				var schema json.RawMessage
-				if sch := d.GetInputSchema(); sch != nil {
-					if raw, err := sch.MarshalJSON(); err == nil {
-						schema = raw
-					}
-				}
-				id := d.GetProviderIdentifier()
-				add(id, id, d.GetToolName(), d.GetDescription(), schema)
+	// Rich definitions only expose provider_identifier; descriptors below
+	// can fill the user-facing name without replacing a newer schema.
+	addDefinitions := func(definitions []*agentv1.McpToolDefinition) {
+		for _, d := range definitions {
+			if d == nil {
+				continue
 			}
+			var schema json.RawMessage
+			if sch := d.GetInputSchema(); sch != nil {
+				if raw, err := sch.MarshalJSON(); err == nil {
+					schema = raw
+				}
+			}
+			id := d.GetProviderIdentifier()
+			add(id, id, d.GetToolName(), d.GetDescription(), schema)
 		}
 	}
-	// Source 2: RequestContext.McpFileSystemOptions.McpDescriptors (the
-	// actual place Cursor ships MCP tool lists in agent turns — the earlier
-	// field is only populated on prewarm). This source has BOTH server_name
-	// and server_identifier, which McpArgs needs on two separate fields.
+	// File descriptors have BOTH server_name and server_identifier, which
+	// McpArgs needs on two separate fields.
 	// The McpToolDescriptor only carries the tool name + a definition_path
 	// pointing at a JSON file Cursor writes with the full MCP tool def
 	// (description + inputSchema). We load that file when present so the
 	// model gets the real arg names instead of guessing at "libraryName".
-	if sess.Action != nil {
-		if uma := sess.Action.GetUserMessageAction(); uma != nil {
-			if rc := uma.GetRequestContext(); rc != nil {
-				if fs := rc.GetMcpFileSystemOptions(); fs != nil {
-					for _, srv := range fs.GetMcpDescriptors() {
-						serverName := srv.GetServerName()
-						serverID := srv.GetServerIdentifier()
-						instr := srv.GetServerUseInstructions()
-						for _, t := range srv.GetTools() {
-							desc, schema := loadMcpDefinition(t.GetDefinitionPath())
-							if desc == "" {
-								desc = instr
-							}
-							if desc == "" {
-								desc = fmt.Sprintf("Tool %q on MCP server %q.", t.GetToolName(), serverName)
-							}
-							add(serverName, serverID, t.GetToolName(), desc, schema)
-						}
+	addFileSystem := func(fs *agentv1.McpFileSystemOptions) {
+		if fs != nil {
+			for _, srv := range fs.GetMcpDescriptors() {
+				serverName := srv.GetServerName()
+				serverID := srv.GetServerIdentifier()
+				instr := srv.GetServerUseInstructions()
+				for _, t := range srv.GetTools() {
+					desc, schema := loadMcpDefinition(t.GetDefinitionPath())
+					if desc == "" {
+						desc = instr
 					}
+					if desc == "" {
+						desc = fmt.Sprintf("Tool %q on MCP server %q.", t.GetToolName(), serverName)
+					}
+					add(serverName, serverID, t.GetToolName(), desc, schema)
 				}
 			}
 		}
+	}
+	// Current action metadata wins over run/prewarm fallbacks. Within an
+	// action, an explicit schema wins over a file definition; missing/null
+	// schemas can still be filled by either source.
+	if rc := requestContextFor(sess); rc != nil {
+		addDefinitions(rc.GetTools())
+		addFileSystem(rc.GetMcpFileSystemOptions())
+	}
+	if sess.Run != nil {
+		addDefinitions(sess.Run.GetMcpTools().GetMcpTools())
+		addFileSystem(sess.Run.GetMcpFileSystemOptions())
 	}
 	for i, e := range collected {
 		fnName := fmt.Sprintf("mcp_%d__%s", i, sanitizeMcpName(e.tool))

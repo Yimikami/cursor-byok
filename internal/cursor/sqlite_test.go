@@ -578,6 +578,13 @@ func injectFakeProUserAt(dbPath, backupPath string) error {
 				return fmt.Errorf("backup read %s: %w", key, err)
 			}
 		}
+		if token := backup[fakeAuthKeys[0]]; token != nil && strings.HasPrefix(*token, cursorSafeStoragePrefix) {
+			decoded, err := decodeCursorAuthToken(dbPath, *token)
+			if err != nil {
+				return err
+			}
+			alreadyFake = decoded == fakeProSessionJWT
+		}
 		// A legacy unbacked fake session is not a usable original account.
 		if alreadyFake {
 			for _, key := range fakeAuthKeys {

@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Preserve Anthropic signed/redacted thinking through native tool-result replay, reconcile thinking with output caps, and keep excess concurrent invocations from canceling active work.
-- Publish complete preference backups atomically and avoid replaying restored settings when only sidecar deletion remains pending; resolve macOS service names through native UUID lookups.
-- Require the current local Cursor account before paid BYOK requests; bound request bodies and gzip expansion without changing native account passthrough.
+- Preserve Anthropic signed/redacted thinking and OpenAI reasoning through native tool replay; reconcile output caps and report truncated replies as errors.
+- Publish preference backups atomically, protect restored settings from stale recovery replay, and resolve macOS network services by stable identity.
+- Require the current local Cursor account for paid BYOK requests and reject unrelated browser origins. Bound request bodies and gzip expansion.
 - Preserve WebSocket upgrade read-ahead bytes, close upgraded tunnels, drain half-closed inference runs, and keep legacy SSE retries attached to their own conversation.
 - Ignore inherited CONNECT proxy settings to prevent self-proxy loops; preserve Connect framing and trailers in rewritten model responses.
+- Keep native tool approvals pending until Cursor responds or the run is canceled, instead of manufacturing incomplete results after 30 seconds.
+- Recognize Windows safeStorage-wrapped legacy temporary sessions in memory and retain recovery data when ownership cannot be established.
+- Support native Tab single-line predictions with bounded latency and disable incompatible thinking budgets for short completions.
 - Support Cursor 3.32.4 local-loop inference over WebSocket and SSE, including native tool schemas, streamed tool calls, cancellation and provider errors.
 - Preserve real Cursor sign-in and forward native account, update and extension requests with verified TLS; remove synthetic account creation and blanket auxiliary 404 responses.
 - Preserve JSONC comments and unrelated edits, scope legacy tool results to their owning run, and stop allocating buffers for late shell events.

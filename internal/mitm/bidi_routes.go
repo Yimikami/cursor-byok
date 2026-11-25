@@ -44,6 +44,8 @@ func localProxyPath(path string) bool {
 		return true
 	}
 	switch path {
+	case "/aiserver.v1.AiService/CppConfig", "/aiserver.v1.AiService/StreamCpp", "/aiserver.v1.CppService/AvailableModels":
+		return true
 	case "/aiserver.v1.AiService/GetDefaultModel", "/agent/v1/run", "/aiserver.v1.AiService/AvailableModels", "/aiserver.v1.AiService/GetDefaultModelNudgeData", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName", "/aiserver.v1.AiService/WriteGitCommitMessage":
 		return true
 	}

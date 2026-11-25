@@ -98,24 +98,16 @@ func buildMessageHistory(sess *Session) []openAIMessage {
 // buildWorkspaceContext composes the <user_info> block Cursor's working app
 // always sends as the first user-role message. We pull whatever the IDE
 // shipped via UserMessageAction.RequestContext.Env (workspace path, OS
-// version, shell, terminals folder, time zone). Returns empty string when
-// the IDE didn't include any usable env data — better to omit the block
-// than to send placeholders.
+// version, shell, terminals folder, time zone). Missing environment fields
+// must not discard separately supplied rules, skills or selected context.
 func buildWorkspaceContext(sess *Session) string {
-	if sess.Action == nil {
+	if sess == nil {
 		return ""
 	}
-	uma := sess.Action.GetUserMessageAction()
-	if uma == nil {
-		return ""
-	}
-	rc := uma.GetRequestContext()
-	if rc == nil {
-		return ""
-	}
+	rc := requestContextFor(sess)
 	env := rc.GetEnv()
 	if env == nil {
-		return ""
+		env = &agentv1.RequestContextEnv{}
 	}
 	var b strings.Builder
 	b.WriteString("<user_info>\n")
@@ -184,6 +176,7 @@ func buildWorkspaceContext(sess *Session) string {
 	appendSelectedContext(&b, sess)
 	appendProjectTree(&b, sess)
 	appendCursorRules(&b, sess)
+	appendNativeContext(&b, sess)
 
 	// Active plan — conversation-scoped PlanState survives across turns (a
 	// fresh session built by BidiAppend on a new turn would otherwise have
@@ -467,14 +460,10 @@ func appendCursorRules(b *strings.Builder, sess *Session) {
 }
 
 func selectedContextFor(sess *Session) *agentv1.SelectedContext {
-	if sess.Action == nil {
+	if sess == nil {
 		return nil
 	}
-	uma := sess.Action.GetUserMessageAction()
-	if uma == nil {
-		return nil
-	}
-	msg := uma.GetUserMessage()
+	msg := userMessageForAction(sess.Action)
 	if msg == nil {
 		return nil
 	}
@@ -482,14 +471,19 @@ func selectedContextFor(sess *Session) *agentv1.SelectedContext {
 }
 
 func requestContextFor(sess *Session) *agentv1.RequestContext {
-	if sess.Action == nil {
+	if sess == nil || sess.Action == nil {
 		return nil
 	}
-	uma := sess.Action.GetUserMessageAction()
-	if uma == nil {
-		return nil
+	if user := sess.Action.GetUserMessageAction(); user != nil {
+		return user.GetRequestContext()
 	}
-	return uma.GetRequestContext()
+	if plan := sess.Action.GetStartPlanAction(); plan != nil {
+		return plan.GetRequestContext()
+	}
+	if execute := sess.Action.GetExecutePlanAction(); execute != nil {
+		return execute.GetRequestContext()
+	}
+	return nil
 }
 
 func trimForContext(s string, max int) string {
@@ -529,14 +523,7 @@ func filepathBase(p string) string {
 // Falls back to a plain text message when no images are present.
 func buildUserMessageWithImages(sess *Session) openAIMessage {
 	query := wrapUserQuery(sess.UserText)
-	if sess.Action == nil {
-		return textMessage("user", query)
-	}
-	uma := sess.Action.GetUserMessageAction()
-	if uma == nil {
-		return textMessage("user", query)
-	}
-	msg := uma.GetUserMessage()
+	msg := userMessageForAction(sess.Action)
 	if msg == nil {
 		return textMessage("user", query)
 	}
@@ -722,10 +709,12 @@ func systemPromptFor(mode agentv1.AgentMode) string {
 // their intermediate tool_calls + tool results to the plain-text fallback.
 func storedToOpenAI(m StoredMessage) openAIMessage {
 	out := openAIMessage{
-		Role:             m.Role,
-		ToolCallID:       m.ToolCallID,
-		Name:             m.Name,
-		AnthropicContent: append(json.RawMessage(nil), m.AnthropicContent...),
+		Role:                   m.Role,
+		ToolCallID:             m.ToolCallID,
+		Name:                   m.Name,
+		AnthropicNativeContent: append(json.RawMessage(nil), m.AnthropicNativeContent...),
+		ReasoningContent:       m.ReasoningContent,
+		ReasoningParts:         append([]providerReasoningPart(nil), m.ReasoningParts...),
 	}
 	if m.Content != "" {
 		raw, _ := json.Marshal(m.Content)
@@ -750,10 +739,12 @@ func storedToOpenAI(m StoredMessage) openAIMessage {
 // unwrapped from json.RawMessage back to a plain string for compact storage.
 func openAIToStored(m openAIMessage) StoredMessage {
 	out := StoredMessage{
-		Role:             m.Role,
-		ToolCallID:       m.ToolCallID,
-		Name:             m.Name,
-		AnthropicContent: append(json.RawMessage(nil), m.AnthropicContent...),
+		Role:                   m.Role,
+		ToolCallID:             m.ToolCallID,
+		Name:                   m.Name,
+		AnthropicNativeContent: append(json.RawMessage(nil), m.AnthropicNativeContent...),
+		ReasoningContent:       m.ReasoningContent,
+		ReasoningParts:         append([]providerReasoningPart(nil), m.ReasoningParts...),
 	}
 	if len(m.Content) > 0 {
 		var s string

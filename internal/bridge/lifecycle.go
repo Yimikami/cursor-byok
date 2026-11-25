@@ -225,13 +225,14 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 	if err := ops.prepareAuth(s.authBackupPath()); err != nil {
 		return rollback(fmt.Errorf("configure Cursor auth: %w", err))
 	}
-	modelAttempted = true
-	if err := ops.selectModel(adapters[0].StableID()); err != nil {
-		return rollback(fmt.Errorf("configure Cursor model: %w", err))
-	}
 	proxyAttempted = true
 	if err := ops.enableProxy(s.state.ListenAddr); err != nil {
 		return rollback(fmt.Errorf("enable system proxy: %w", err))
+	}
+	// Keep model changes last, with their own recoverable snapshot.
+	modelAttempted = true
+	if err := ops.selectModel(adapters[0].StableID()); err != nil {
+		return rollback(fmt.Errorf("configure Cursor model: %w", err))
 	}
 	s.proxy = srv
 	s.state.Running = true
