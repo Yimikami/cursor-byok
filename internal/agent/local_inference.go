@@ -98,13 +98,13 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 	if requested == nil {
 		requested = runModel
 	}
-	if modelID != "" {
+	if modelID != "" || resolve != nil {
 		var ok bool
 		var adapters []AdapterTarget
 		if resolve != nil {
 			adapters = resolve()
 		}
-		target, ok = ResolveAdapterForModel(adapters, modelID)
+		target, ok = resolveNativeAdapterForModel(adapters, modelID)
 		if !ok {
 			return errors.New("no BYOK adapter configured")
 		}
@@ -172,6 +172,14 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 	for i, call := range result.ToolCalls {
 		if strings.TrimSpace(call.Arguments) == "" {
 			result.ToolCalls[i].Arguments = "{}"
+		}
+		if !custom[call.Name] {
+			for _, tool := range request.GetTools() {
+				if tool.GetName() == call.Name && tool.GetParameters() != nil {
+					result.ToolCalls[i].Arguments = normalizeNativeArguments(result.ToolCalls[i].Arguments, tool.GetParameters().AsMap())
+					break
+				}
+			}
 		}
 		if custom[call.Name] {
 			var wrapped struct {

@@ -49,6 +49,7 @@ func (s *ProxyService) lifecycleOps() *proxyLifecycle {
 				for _, a := range ads {
 					out = append(out, agent.AdapterTargetFromRelay(a))
 				}
+				applyNativeModelSelection(s.cfgDir, out)
 				return out
 			}
 			selectedModel := func(purpose string) string { return selectedModelFor(s.cfgDir, purpose) }

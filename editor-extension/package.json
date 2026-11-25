@@ -1,0 +1,19 @@
+{
+  "name": "cursor-byok-model-picker",
+  "displayName": "Cursor BYOK Model Picker",
+  "description": "Select your configured local BYOK model from Cursor's command palette or status bar.",
+  "version": "0.1.0",
+  "publisher": "cursor-byok-local",
+  "license": "AGPL-3.0-only",
+  "repository": { "type": "git", "url": "https://github.com/Yimikami/cursor-byok" },
+  "engines": { "vscode": "^1.90.0" },
+  "categories": ["Other"],
+  "extensionKind": ["ui"],
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "capabilities": { "untrustedWorkspaces": { "supported": true } },
+  "contributes": {
+    "commands": [{ "command": "cursorByok.selectModel", "title": "Cursor BYOK: Select Model" }]
+  },
+  "scripts": { "test": "node --test storage.test.js" }
+}

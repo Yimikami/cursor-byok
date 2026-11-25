@@ -87,3 +87,7 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+
+      - name: Editor model picker tests
+        working-directory: editor-extension
+        run: node --test storage.test.js

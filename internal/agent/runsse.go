@@ -62,13 +62,15 @@ func (l *lockedWriter) Flush() {
 }
 
 type AdapterTarget struct {
-	ProviderType string
-	BaseURL      string
-	APIKey       string
-	Model        string
-	StableID     string
-	DisplayName  string
-	Opts         AdapterOpts
+	// Set only by the user's local editor companion, never by account metadata.
+	NativeSelectionOverride bool
+	ProviderType            string
+	BaseURL                 string
+	APIKey                  string
+	Model                   string
+	StableID                string
+	DisplayName             string
+	Opts                    AdapterOpts
 }
 
 // AdapterResolver returns all configured adapters so handlers can resolve the
@@ -119,6 +121,17 @@ func ResolveAdapterForModel(adapters []AdapterTarget, requested string) (Adapter
 	return adapters[0], true
 }
 
+// Explicit companion selection applies to local agent inference. Separate
+// commit/review model routing and Cursor-hosted services retain their semantics.
+func resolveNativeAdapterForModel(adapters []AdapterTarget, requested string) (AdapterTarget, bool) {
+	for _, adapter := range adapters {
+		if adapter.NativeSelectionOverride {
+			return adapter, true
+		}
+	}
+	return ResolveAdapterForModel(adapters, requested)
+}
+
 func ResolveAdapterForAgentSession(adapters []AdapterTarget, sess *Session) (AdapterTarget, bool) {
 	requested := ""
 	if sess != nil && sess.ModelDetails != nil {
@@ -127,7 +140,7 @@ func ResolveAdapterForAgentSession(adapters []AdapterTarget, sess *Session) (Ada
 			requested = sess.ModelDetails.GetDisplayModelId()
 		}
 	}
-	target, ok := ResolveAdapterForModel(adapters, requested)
+	target, ok := resolveNativeAdapterForModel(adapters, requested)
 	if ok && sess != nil && sess.RequestedModel != nil {
 		for _, param := range sess.RequestedModel.GetParameters() {
 			if param.GetId() == "reasoning" && param.GetValue() != "none" {

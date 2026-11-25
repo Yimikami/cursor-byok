@@ -1,0 +1,3 @@
+storage.test.js
+node_modules/**
+*.vsix

@@ -164,7 +164,7 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 					adapters = resolve()
 				}
 				var found bool
-				target, found = ResolveAdapterForModel(adapters, string(id))
+				target, found = resolveNativeAdapterForModel(adapters, string(id))
 				if !found {
 					return errors.New("no provider is configured")
 				}
@@ -248,7 +248,7 @@ func runInferenceSession(ctx context.Context, messages <-chan []byte, rawWriter 
 					if resolve != nil {
 						adapters = resolve()
 					}
-					adapter, ok := ResolveAdapterForModel(adapters, name)
+					adapter, ok := resolveNativeAdapterForModel(adapters, name)
 					entry := &inferencev1.RunInferenceResolvedSubagentModel{Requested: name, Policy: &inferencev1.RunInferenceSubagentModelPolicy{Valid: ok, Blocked: !ok}}
 					if ok {
 						slug := resolvedInferenceModel(adapter, nil).GetModelId()

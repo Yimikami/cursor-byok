@@ -249,7 +249,12 @@ func newProxyService(dir string, recoverSession func(*ProxyService) error) (*Pro
 	// survive restart. The agent package walks this on first use and loads
 	// every <conv_id>.jsonl back into its in-memory session history.
 	agent.InitHistoryDir(filepath.Join(dir, "history"))
-	cfg, _ := readConfig(dir)
+	cfg, configErr := readConfig(dir)
+	if configErr == nil {
+		if err := publishModelPickerCatalog(dir, cfg); err != nil {
+			return nil, fmt.Errorf("publish editor model catalog: %w", err)
+		}
+	}
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
 		baseURL = defaultUpstream
@@ -368,7 +373,10 @@ func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(s.cfgDir, "config.json"), b, 0o600)
+	if err := os.WriteFile(filepath.Join(s.cfgDir, "config.json"), b, 0o600); err != nil {
+		return err
+	}
+	return publishModelPickerCatalog(s.cfgDir, cfg)
 }
 
 func (s *ProxyService) ExportCAPEM() string {

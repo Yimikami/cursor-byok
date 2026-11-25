@@ -762,6 +762,9 @@ onBeforeUnmount(() => {
             <div class="row-title">Default active model</div>
             <div class="row-desc">
               Controls which model new chats and unqualified requests use by default.
+              A model selected with Cursor BYOK: Select Model in the editor overrides
+              this default for local Agent requests. Choose Use Cursor selection /
+              BYOK default in that picker to follow this setting again.
             </div>
             <div class="special-model-grid">
               <label class="special-model-field">

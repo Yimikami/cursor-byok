@@ -123,6 +123,14 @@ local or native stream before delivery. BYOK supports WebSocket and SSE;
 unsupported local Poll endpoints return an explicit error. Native Poll endpoints
 from the inspected client pass through.
 
+## Windows desktop follow-up
+
+The 2026-11-26 Windows Cursor 3.32.4 follow-up adds real Skill, MCP, Ask, Debug,
+Multitask, SCM and local-tool results. It also records the unresolved CreatePlan
+todo-array failure, unfinished Tab/hosted-service checks, and the separate BYOK
+model picker. See [the detailed report](windows-native-desktop-followup.md);
+earlier protocol-only evidence should not be read as desktop acceptance.
+
 ## Remaining compatibility boundaries
 
 Native Tab, inline edit/Cmd-K, cloud agents, indexing, browser/image/search
