@@ -169,6 +169,7 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 	if err := validateProviderToolCalls(result.ToolCalls); err != nil {
 		return err
 	}
+	var repairedCalls []PendingToolCall
 	for i, call := range result.ToolCalls {
 		if strings.TrimSpace(call.Arguments) == "" {
 			result.ToolCalls[i].Arguments = "{}"
@@ -188,6 +189,15 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 			if json.Unmarshal([]byte(call.Arguments), &wrapped) != nil || wrapped.Input == nil {
 				return fmt.Errorf("custom tool %s requires an input string", call.Name)
 			}
+		}
+		if result.ToolCalls[i].Arguments != call.Arguments {
+			repairedCalls = append(repairedCalls, result.ToolCalls[i])
+		}
+	}
+	if len(repairedCalls) > 0 && len(result.AnthropicNativeContent) > 0 {
+		result.AnthropicNativeContent, err = repairInferenceAnthropicToolInputs(result.AnthropicNativeContent, repairedCalls)
+		if err != nil {
+			return err
 		}
 	}
 	if thinking.Len() > 0 {

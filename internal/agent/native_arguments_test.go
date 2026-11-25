@@ -40,6 +40,55 @@ func TestNativeArgumentsDecodeOnlyExplicitCollections(t *testing.T) {
 	}
 }
 
+func TestNativeArgumentsRespectPatternAndTupleSchemas(t *testing.T) {
+	for _, tc := range []struct {
+		name, schema, arguments, want string
+	}{
+		{
+			"pattern-string-is-not-an-additional-array",
+			`{"type":"object","patternProperties":{"^literal_":{"type":"string"}},"additionalProperties":{"type":"array"}}`,
+			`{"literal_value":"[1,2]","other":[3]}`,
+			`{"literal_value":"[1,2]","other":[3]}`,
+		},
+		{
+			"prefix-schema-before-tail-items",
+			`{"type":"array","prefixItems":[{"type":"string"},{"type":"object","properties":{"literal":{"type":"string"}}}],"items":{"type":"array"}}`,
+			`["[1]","{\"literal\":\"[2]\"}","[3]"]`,
+			`["[1]",{"literal":"[2]"},[3]]`,
+		},
+		{
+			"boolean-prefix-does-not-inherit-tail-schema",
+			`{"type":"array","prefixItems":[true],"items":{"type":"array"}}`,
+			`["[1]","[2]"]`,
+			`["[1]",[2]]`,
+		},
+		{
+			"unknown-prefix-shape-fails-closed",
+			`{"type":"array","prefixItems":{"type":"string"},"items":{"type":"array"}}`,
+			`["[1]"]`,
+			`["[1]"]`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var schema map[string]any
+			if err := json.Unmarshal([]byte(tc.schema), &schema); err != nil {
+				t.Fatal(err)
+			}
+			got := normalizeNativeArguments(tc.arguments, schema)
+			var actual, expected any
+			if err := json.Unmarshal([]byte(got), &actual); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &expected); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(actual, expected) {
+				t.Fatalf("wrong schema applied to member: got=%s want=%s", got, tc.want)
+			}
+		})
+	}
+}
+
 // Regression for the real Cursor 3.32.4/Letum CreatePlan failure: todos arrived
 // as a JSON string. Both the complete stream part and final response must agree
 // before Cursor executes the call or records it in conversation history.

@@ -69,6 +69,12 @@ func normalizeNativeArgumentValue(value any, schema map[string]any, depth int) (
 		if kind != "object" {
 			return value, changed
 		}
+		// Pattern schemas can overlap named properties, and matching keys do
+		// not use additionalProperties. Without ECMA-262 pattern matching and
+		// schema conjunction evaluation, leave every member's value intact.
+		if _, patterned := schema["patternProperties"]; patterned {
+			return value, changed
+		}
 		properties, _ := schema["properties"].(map[string]any)
 		for key, child := range typed {
 			childSchema, known := properties[key]
@@ -85,9 +91,23 @@ func normalizeNativeArgumentValue(value any, schema map[string]any, depth int) (
 		if kind != "array" {
 			return value, changed
 		}
+		var prefix []any
+		if rawPrefix, exists := schema["prefixItems"]; exists {
+			var ok bool
+			prefix, ok = rawPrefix.([]any)
+			if !ok {
+				return value, changed
+			}
+		}
 		items, _ := schema["items"].(map[string]any)
 		for index, child := range typed {
-			normalized, childChanged := normalizeNativeArgumentValue(child, items, depth+1)
+			childSchema := items
+			if index < len(prefix) {
+				// items applies only after the tuple prefix. A boolean prefix
+				// schema supplies no collection type, so it cannot coerce input.
+				childSchema, _ = prefix[index].(map[string]any)
+			}
+			normalized, childChanged := normalizeNativeArgumentValue(child, childSchema, depth+1)
 			if childChanged {
 				typed[index], changed = normalized, true
 			}
