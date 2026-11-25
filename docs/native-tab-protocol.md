@@ -1,6 +1,7 @@
 # Native Tab completion contract
 
-Windows Cursor 3.31.15, inspected 2026-11-25. This is source/fixture validation;
+Windows Cursor 3.31.15, inspected 2026-11-25; pure text-consumer check repeated
+against the installed 3.32.4 update on 2026-11-26. This is source/fixture validation;
 real Tab UI acceptance and provider latency remain separate checks.
 
 ## Active installed path
@@ -67,3 +68,9 @@ Artifact `extensions/cursor-always-local/dist/main.js` SHA-256:
 Offsets: 4469654 active RPC; 4475773 filesync retry; 4003581 geo transport.
 Current field declarations were checked against the repository protobuf; no
 new guessed messages or successful empty backend stubs were introduced.
+
+The installed application updated to 3.32.4 during validation. Its workbench
+SHA-256 is `7790e8debe902d9edce3948607f486d870c43d9f565ad6d658c2783309666072`.
+The equivalent pure helpers are now named `w1f` through `Kbd`, with `I1f`
+consuming non-fused text. The opt-in test recognizes both inspected bounded
+blocks and rejects unknown layouts; it still does not execute the app module.

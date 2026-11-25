@@ -1,6 +1,7 @@
 # Windows and native Cursor validation
 
-Updated: 2026-11-26. Windows Cursor 3.31.15; initial repository baseline
+Updated: 2026-11-26. Live UI checks used Windows Cursor 3.31.15; the installation
+later updated to 3.32.4 before the final pure-consumer checks. Initial repository baseline
 `519591e23ae2c75eef4312ae574e67a987eecb87`.
 
 ## Verified on the Windows host
