@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require the exact macOS CA SSL trust record before reporting readiness, and remove only trust domains containing that certificate.
+- Keep OpenAI alternative choices separate so text, reasoning, tool calls and finish markers from another choice cannot corrupt the selected response.
+
+- Decode macOS Cursor safeStorage sessions for local account ownership checks; validate account access before changing proxy settings and keep Keychain permission requests confined to an explicit service start.
 - Preserve Anthropic signed/redacted thinking and OpenAI reasoning through native tool replay; reconcile output caps and report truncated replies as errors.
 - Publish preference backups atomically, protect restored settings from stale recovery replay, and resolve macOS network services by stable identity.
 - Require the current local Cursor account for paid BYOK requests and reject unrelated browser origins. Bound request bodies and gzip expansion.

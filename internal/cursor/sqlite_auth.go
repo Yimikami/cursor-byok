@@ -11,12 +11,19 @@ import (
 const cursorSafeStoragePrefix = "cursor-safe-storage:v1:"
 
 func decodeCursorAuthToken(dbPath, value string) (string, error) {
-	if !strings.HasPrefix(value, cursorSafeStoragePrefix) {
+	return decodeCursorAuthTokenWith(dbPath, value, decryptCursorSafeStorage)
+}
+
+func decodeCursorAuthTokenWith(dbPath, value string, decrypt func(string, []byte) (string, error)) (string, error) {
+	if !strings.HasPrefix(value, "cursor-safe-storage:") {
 		return value, nil
+	}
+	if !strings.HasPrefix(value, cursorSafeStoragePrefix) {
+		return "", fmt.Errorf("unsupported Cursor safeStorage envelope version")
 	}
 	encrypted, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(value, cursorSafeStoragePrefix))
 	if err != nil {
 		return "", fmt.Errorf("invalid Cursor safeStorage envelope")
 	}
-	return decryptCursorSafeStorage(dbPath, encrypted)
+	return decrypt(dbPath, encrypted)
 }

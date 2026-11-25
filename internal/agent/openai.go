@@ -235,7 +235,7 @@ func streamOpenAI(
 			result.ReasoningParts = []providerReasoningPart{{Text: reasoning.String(), ModelName: model}}
 		}
 	}()
-	// Per-choice accumulators keyed by tool_call index. OpenAI streams a
+	// Accumulators for choice zero, keyed by tool_call index. OpenAI streams a
 	// tool_call across many chunks — first a chunk with the id+name+type,
 	// then N chunks appending fragments of the JSON arguments string. We
 	// reassemble by index and emit the final struct in result.ToolCalls.
@@ -288,6 +288,11 @@ func streamOpenAI(
 			result.Usage = chunk.Usage
 		}
 		for _, c := range chunk.Choices {
+			// Choices are alternative responses, not fragments of one answer.
+			// A missing index decodes to zero for compatible single-choice APIs.
+			if c.Index != 0 {
+				continue
+			}
 			reasoning.WriteString(c.Delta.Reasoning)
 			if c.Delta.Content != "" || c.Delta.Reasoning != "" {
 				if err := onDelta(c.Delta.Content, c.Delta.Reasoning, false); err != nil {

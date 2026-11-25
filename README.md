@@ -186,6 +186,16 @@ dashboards.
 Cursor caches account and model settings in memory. Keeping it open during Start
 or Stop can hide the updated values or write its cached values back over a restore.
 
+Recent macOS Cursor versions encrypt their saved session with Keychain. When you
+explicitly start the service, macOS may ask to let cursor-byok access the single
+**Cursor Safe Storage** item (account **Cursor Key**) to verify the local account.
+This is separate from installing the proxy certificate. Choose **Always Allow**
+for the cursor-byok app if you want it to continue checking this account without
+additional prompts: macOS **Allow** grants only one read and is insufficient for
+ongoing ownership checks. Canceling leaves the current routing unchanged. Requests
+and automatic recovery never open this permission dialog. macOS builds require
+CGO for this integration.
+
 If setup fails, the service restores changes already made and reports the failing
 step. If restoration fails, it keeps the listener available and retains the
 backups; resolve the reported error and retry **Stop service**. On the next app

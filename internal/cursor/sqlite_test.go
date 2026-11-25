@@ -33,6 +33,25 @@ func TestPrepareCursorAuthPreservesRealAccountWithoutBackup(t *testing.T) {
 	}
 }
 
+func TestPrepareCursorAuthRejectsUnreadableEncryptedAccountWithoutChangingIt(t *testing.T) {
+	original := map[string]string{
+		"cursorAuth/accessToken":  cursorSafeStoragePrefix + "not-valid-base64!",
+		"cursorAuth/refreshToken": "encrypted-refresh", "cursorAuth/cachedEmail": "real@example.test",
+		"cursorAuth/stripeMembershipType": "free", "unrelated": "keep",
+	}
+	db, path, backup := testCursorDB(t, original)
+	err := prepareCursorAuthAt(path, backup)
+	if err == nil || !strings.Contains(err.Error(), "invalid Cursor safeStorage envelope") || !strings.Contains(err.Error(), "existing state retained") {
+		t.Fatalf("unreadable encrypted account passed preflight: %v", err)
+	}
+	if got := readTestItems(t, db); !reflect.DeepEqual(got, original) {
+		t.Fatal("preflight changed the unreadable account")
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("preflight created an auth backup: %v", err)
+	}
+}
+
 func TestPrepareCursorAuthMigratesLegacyBackup(t *testing.T) {
 	original := map[string]string{
 		"cursorAuth/accessToken": "real-session", "cursorAuth/refreshToken": "real-refresh",
