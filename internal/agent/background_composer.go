@@ -24,8 +24,8 @@ func HandleAddAsyncBackgroundComposer(reqBody []byte, contentType string) Result
 		bcID = newBackgroundComposerID()
 	}
 	prompt := &aiserverv1.HeadlessAgenticComposerPrompt{
-		Text:                req.GetFollowup(),
-		RichText:            req.GetRichFollowup(),
+		Text:                    req.GetFollowup(),
+		RichText:                req.GetRichFollowup(),
 		BaseConversationMessage: req.GetFollowupMessage(),
 	}
 	st := &backgroundComposerState{
@@ -284,8 +284,9 @@ func executeBackgroundComposerTool(w io.Writer, sess *Session, pc PendingToolCal
 	}
 	execID := newExecID(execToolName(pc.Name))
 	seq := nextExecSeq()
-	waitCh := registerToolWait(pc.ID)
-	registerExecIDAlias(execID, seq, pc.ID)
+	waitCh := registerToolWait(sess.RequestID, pc.ID)
+	defer releaseToolWait(waitCh)
+	registerExecIDAlias(sess.RequestID, execID, seq, pc.ID)
 	if err := writeExecRequest(w, execID, seq, pc, tc); err != nil {
 		errMsg := err.Error()
 		return `{"error":` + jsonString(errMsg) + `}`, &aiserverv1.ClientSideToolV2Result{Tool: v2Tool, ToolCallId: pc.ID, Error: &aiserverv1.ToolResultError{ClientVisibleErrorMessage: errMsg, ModelVisibleErrorMessage: errMsg}}

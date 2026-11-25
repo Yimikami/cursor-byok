@@ -10,23 +10,24 @@ import (
 )
 
 // Cursor (and VSCode) settings.json keys we set so that Cursor honours the
-// local proxy and tolerates our self-signed CA. Stored on disk so we can
+// local proxy and uses the installed local CA with certificate validation. Stored on disk so we can
 // restore the user's previous values on Stop.
 type tweakBackup struct {
-	HasHTTPProxy           bool `json:"hasHttpProxy"`
-	HTTPProxy              any  `json:"httpProxy,omitempty"`
-	HasHTTPProxyStrictSSL  bool `json:"hasHttpProxyStrictSsl"`
-	HTTPProxyStrictSSL     any  `json:"httpProxyStrictSsl,omitempty"`
-	HasHTTPProxySupport    bool `json:"hasHttpProxySupport"`
-	HTTPProxySupport       any  `json:"httpProxySupport,omitempty"`
-	HasHTTPProxyAuthHelper bool `json:"hasHttpProxyAuthHelper"`
-	HTTPProxyAuthHelper    any  `json:"httpProxyAuthHelper,omitempty"`
-	HasHTTPCompatHTTP1     bool `json:"hasHttpCompatHttp1"`
-	HTTPCompatHTTP1        any  `json:"httpCompatHttp1,omitempty"`
-	HasDisableHTTP2        bool `json:"hasDisableHttp2"`
-	DisableHTTP2           any  `json:"disableHttp2,omitempty"`
-	HasProxyKerberos       bool `json:"hasProxyKerberos"`
-	ProxyKerberos          any  `json:"proxyKerberos,omitempty"`
+	RawValues              map[string]string `json:"rawValues,omitempty"`
+	HasHTTPProxy           bool              `json:"hasHttpProxy"`
+	HTTPProxy              any               `json:"httpProxy,omitempty"`
+	HasHTTPProxyStrictSSL  bool              `json:"hasHttpProxyStrictSsl"`
+	HTTPProxyStrictSSL     any               `json:"httpProxyStrictSsl,omitempty"`
+	HasHTTPProxySupport    bool              `json:"hasHttpProxySupport"`
+	HTTPProxySupport       any               `json:"httpProxySupport,omitempty"`
+	HasHTTPProxyAuthHelper bool              `json:"hasHttpProxyAuthHelper"`
+	HTTPProxyAuthHelper    any               `json:"httpProxyAuthHelper,omitempty"`
+	HasHTTPCompatHTTP1     bool              `json:"hasHttpCompatHttp1"`
+	HTTPCompatHTTP1        any               `json:"httpCompatHttp1,omitempty"`
+	HasDisableHTTP2        bool              `json:"hasDisableHttp2"`
+	DisableHTTP2           any               `json:"disableHttp2,omitempty"`
+	HasProxyKerberos       bool              `json:"hasProxyKerberos"`
+	ProxyKerberos          any               `json:"proxyKerberos,omitempty"`
 }
 
 var settingsMu sync.Mutex
@@ -131,37 +132,48 @@ func configDir() (string, error) {
 }
 
 func readSettings() (map[string]any, error) {
-	p := settingsPath()
-	if p == "" {
-		return nil, fmt.Errorf("could not resolve Cursor settings path")
-	}
-	b, err := os.ReadFile(p)
+	data, err := readSettingsData(settingsPath())
 	if err != nil {
-		if os.IsNotExist(err) {
-			return map[string]any{}, nil
-		}
 		return nil, err
 	}
-	m, err := decodeSettings(b)
+	m, err := decodeSettings(data)
 	if err != nil {
 		return nil, fmt.Errorf("settings.json is not valid JSONC: %w", err)
 	}
 	return m, nil
 }
 
-func writeSettings(m map[string]any) error {
-	p := settingsPath()
-	if p == "" {
+func readSettingsData(path string) ([]byte, error) {
+	if path == "" {
+		return nil, fmt.Errorf("could not resolve Cursor settings path")
+	}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return []byte("{}\n"), nil
+	}
+	return data, err
+}
+
+func writeSettingsData(path string, data []byte) error {
+	if path == "" {
 		return fmt.Errorf("could not resolve Cursor settings path")
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		return err
+	return os.WriteFile(path, data, 0o644)
+}
+
+func cursorTweakChanges(proxyAddr string) map[string]settingsChange {
+	return map[string]settingsChange{
+		"http.proxy":                             {present: true, value: "http://" + proxyAddr},
+		"http.proxyStrictSSL":                    {present: true, value: true},
+		"http.proxySupport":                      {present: true, value: "on"},
+		"http.experimental.systemCertificatesV2": {present: true, value: true},
+		"cursor.general.useHttp1":                {present: true, value: true},
+		"cursor.general.disableHttp2":            {present: true, value: true},
+		"http.proxyKerberosServicePrincipal":     {present: true, value: "http://" + proxyAddr},
 	}
-	return os.WriteFile(p, b, 0o644)
 }
 
 // ApplyCursorTweaks writes the proxy + cert tweaks Cursor needs. Original
@@ -170,19 +182,37 @@ func ApplyCursorTweaks(proxyAddr string) error {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 
-	m, err := readSettings()
+	return applyCursorTweaksAt(settingsPath(), backupPath(), proxyAddr)
+}
+
+func applyCursorTweaksAt(settingsFile, backupFile, proxyAddr string) error {
+	data, err := readSettingsData(settingsFile)
 	if err != nil {
 		return err
 	}
+	doc, err := parseSettingsDocument(data)
+	if err != nil {
+		return fmt.Errorf("settings.json is not valid JSONC: %w", err)
+	}
+	changes := cursorTweakChanges(proxyAddr)
+	rawValues, err := doc.rawValues(changes)
+	if err != nil {
+		return err
+	}
+	updated, err := editSettings(data, changes)
+	if err != nil {
+		return err
+	}
+	m := doc.values
 
 	// Only snapshot when no backup exists yet. If the app crashed while our
 	// tweaks were active, settings.json is already mutated — re-snapshotting
 	// it would permanently overwrite the user's pristine values with our
 	// overrides, and a later Revert would be a no-op. The file is removed
 	// on successful Revert, so a clean cycle still re-snapshots next time.
-	if p := backupPath(); p != "" {
+	if p := backupFile; p != "" {
 		if _, statErr := os.Stat(p); os.IsNotExist(statErr) {
-			var bk tweakBackup
+			bk := tweakBackup{RawValues: rawValues}
 			bk.HTTPProxy, bk.HasHTTPProxy = m["http.proxy"]
 			bk.HTTPProxyStrictSSL, bk.HasHTTPProxyStrictSSL = m["http.proxyStrictSSL"]
 			bk.HTTPProxySupport, bk.HasHTTPProxySupport = m["http.proxySupport"]
@@ -190,27 +220,19 @@ func ApplyCursorTweaks(proxyAddr string) error {
 			bk.HTTPCompatHTTP1, bk.HasHTTPCompatHTTP1 = m["cursor.general.useHttp1"]
 			bk.DisableHTTP2, bk.HasDisableHTTP2 = m["cursor.general.disableHttp2"]
 			bk.ProxyKerberos, bk.HasProxyKerberos = m["http.proxyKerberosServicePrincipal"]
-			if err := saveBackup(bk); err != nil {
+			if err := saveBackupAt(backupFile, bk); err != nil {
 				return err
 			}
 		} else if statErr != nil {
 			return fmt.Errorf("inspect settings backup: %w", statErr)
-		} else if _, err := loadBackup(); err != nil {
+		} else if _, err := loadBackupAt(backupFile); err != nil {
 			return fmt.Errorf("read settings backup: %w", err)
 		}
 	} else {
 		return fmt.Errorf("could not resolve settings backup path")
 	}
 
-	m["http.proxy"] = "http://" + proxyAddr
-	m["http.proxyStrictSSL"] = false
-	m["http.proxySupport"] = "on"
-	m["http.experimental.systemCertificatesV2"] = true
-	m["cursor.general.useHttp1"] = true
-	m["cursor.general.disableHttp2"] = true
-	m["http.proxyKerberosServicePrincipal"] = "http://" + proxyAddr
-
-	return writeSettings(m)
+	return writeSettingsData(settingsFile, updated)
 }
 
 // RevertCursorTweaks restores whatever was in settings.json before
@@ -219,24 +241,24 @@ func RevertCursorTweaks() error {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 
-	bk, err := loadBackup()
+	return revertCursorTweaksAt(settingsPath(), backupPath())
+}
+
+func revertCursorTweaksAt(settingsFile, backupFile string) error {
+	bk, err := loadBackupAt(backupFile)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
 		return fmt.Errorf("read settings backup: %w", err)
 	}
-	m, err := readSettings()
+	data, err := readSettingsData(settingsFile)
 	if err != nil {
 		return err
 	}
-
+	changes := make(map[string]settingsChange)
 	restore := func(key string, has bool, val any) {
-		if has {
-			m[key] = val
-		} else {
-			delete(m, key)
-		}
+		changes[key] = settingsChange{present: has, value: val, raw: bk.RawValues[key]}
 	}
 	restore("http.proxy", bk.HasHTTPProxy, bk.HTTPProxy)
 	restore("http.proxyStrictSSL", bk.HasHTTPProxyStrictSSL, bk.HTTPProxyStrictSSL)
@@ -246,17 +268,20 @@ func RevertCursorTweaks() error {
 	restore("cursor.general.disableHttp2", bk.HasDisableHTTP2, bk.DisableHTTP2)
 	restore("http.proxyKerberosServicePrincipal", bk.HasProxyKerberos, bk.ProxyKerberos)
 
-	if err := writeSettings(m); err != nil {
+	updated, err := editSettings(data, changes)
+	if err != nil {
 		return err
 	}
-	if err := os.Remove(backupPath()); err != nil && !os.IsNotExist(err) {
+	if err := writeSettingsData(settingsFile, updated); err != nil {
+		return err
+	}
+	if err := os.Remove(backupFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove restored settings backup: %w", err)
 	}
 	return nil
 }
 
-func saveBackup(bk tweakBackup) error {
-	p := backupPath()
+func saveBackupAt(p string, bk tweakBackup) error {
 	if p == "" {
 		return fmt.Errorf("could not resolve backup path")
 	}
@@ -270,9 +295,9 @@ func saveBackup(bk tweakBackup) error {
 	return os.WriteFile(p, b, 0o644)
 }
 
-func loadBackup() (tweakBackup, error) {
+func loadBackupAt(path string) (tweakBackup, error) {
 	var bk tweakBackup
-	b, err := os.ReadFile(backupPath())
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return bk, err
 	}

@@ -527,7 +527,7 @@ function obscure(key: string) {
 const allTweaksOn = computed(
   () =>
     tweaks.value.proxySet &&
-    tweaks.value.strictSSLOff &&
+    !tweaks.value.strictSSLOff &&
     tweaks.value.proxySupportOn &&
     tweaks.value.systemCertsV2On &&
     tweaks.value.useHttp1 &&
@@ -708,6 +708,10 @@ onBeforeUnmount(() => {
 
     <!-- ============ OVERVIEW ============ -->
     <main v-if="currentView === 'overview'" class="page">
+      <p class="row-desc" style="margin: 0 0 16px">
+        Fully quit Cursor before starting or stopping the service, then reopen it
+        to load the updated account and model settings.
+      </p>
       <!-- Model list -->
       <div class="overview-section-head">
         <h3>Models</h3>

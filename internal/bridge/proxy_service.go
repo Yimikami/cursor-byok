@@ -335,6 +335,10 @@ func (s *ProxyService) authBackupPath() string {
 	return filepath.Join(s.cfgDir, "cursor-auth-backup.json")
 }
 
+func (s *ProxyService) modelBackupPath() string {
+	return filepath.Join(s.cfgDir, "cursor-model-backup.json")
+}
+
 func (s *ProxyService) SetBaseURL(url string) (ProxyState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

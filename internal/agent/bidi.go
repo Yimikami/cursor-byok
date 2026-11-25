@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -26,20 +25,18 @@ type Result struct {
 	Body        []byte
 }
 
-// HandleBidiAppend parses the incoming BidiAppendRequest, decodes the inner
-// AgentClientMessage, extracts the user message + model bindings, and stows
-// them in the session store keyed by RequestId so the matching RunSSE call
-// can pick them up. Returns an empty BidiAppendResponse — Cursor accepts a
-// 0-byte body for unary success on this RPC.
+// HandleBidiAppend validates the transport envelope and queues its opaque
+// inner payload. The matching stream endpoint selects the inner protocol.
 func HandleBidiAppend(reqBody []byte, contentType string) Result {
 	bidi := &aiserverv1.BidiAppendRequest{}
 	if err := decodeUnary(reqBody, contentType, bidi); err != nil {
 		return errResult(http.StatusBadRequest, "decode bidi append: "+err.Error())
 	}
-	if shouldRouteToBugBot(bidi) {
-		return handleBugBotBidiAppendDecoded(bidi)
+	data, err := decodeBidiPayload(bidi)
+	if err != nil {
+		return errResult(http.StatusBadRequest, err.Error())
 	}
-	return handleAgentBidiAppendDecoded(bidi)
+	return bidiInboxes.append(bidi.GetRequestId().GetRequestId(), bidi.GetAppendSeqno(), data)
 }
 
 func handleAgentBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
@@ -55,19 +52,20 @@ func handleAgentBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
 		return errResult(http.StatusBadRequest, "missing request_id")
 	}
 
-	// Cursor stuffs the AgentClientMessage proto into BidiAppendRequest.Data
-	// as hex (lower-case, no separator). Empty Data means a heartbeat / ack
-	// frame — we just record the request_id with no extra state.
+	raw, err := decodeBidiPayload(bidi)
+	if err != nil {
+		return errResult(http.StatusBadRequest, err.Error())
+	}
+	return applyAgentBidiPayload(requestID, raw)
+}
+
+func applyAgentBidiPayload(requestID string, raw []byte) Result {
 	sess := &Session{RequestID: requestID}
 	if existing := GetSession(requestID); existing != nil {
 		sess = existing
 	}
 
-	if bidi.Data != "" {
-		raw, err := hex.DecodeString(strings.TrimSpace(bidi.Data))
-		if err != nil {
-			return errResult(http.StatusBadRequest, "bidi data not hex: "+err.Error())
-		}
+	if len(raw) > 0 {
 		acm := &agentv1.AgentClientMessage{}
 		if err := proto.Unmarshal(raw, acm); err != nil {
 			return errResult(http.StatusBadRequest, "parse agent client message: "+err.Error())
@@ -76,12 +74,12 @@ func handleAgentBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
 		// Route tool results back to the RunSSE goroutine waiting on them.
 		// Cursor posts ExecClientMessage with the matching tool_call_id
 		// (exec_id) once the IDE finishes running a tool.
-		routeExecClientResult(acm)
+		routeExecClientResult(requestID, acm)
 		// Route interaction verdicts (user approved/rejected a SwitchMode
 		// prompt, CreatePlan prompt, WebSearch prompt, etc.) back to the
 		// RunSSE goroutine that's blocking on the user's decision.
 		if ir := acm.GetInteractionResponse(); ir != nil {
-			deliverInteractionResponse(ir)
+			deliverInteractionResponse(requestID, ir)
 		}
 	}
 
@@ -97,11 +95,7 @@ func handleAgentBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
 // transport. Cursor sends the initial StreamBugBotRequest and later tool
 // results through the same BidiAppend envelope keyed by request_id.
 func HandleBugBotBidiAppend(reqBody []byte, contentType string) Result {
-	bidi := &aiserverv1.BidiAppendRequest{}
-	if err := decodeUnary(reqBody, contentType, bidi); err != nil {
-		return errResult(http.StatusBadRequest, "decode bugbot bidi append: "+err.Error())
-	}
-	return handleBugBotBidiAppendDecoded(bidi)
+	return HandleBidiAppend(reqBody, contentType)
 }
 
 func handleBugBotBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
@@ -117,16 +111,20 @@ func handleBugBotBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
 		return errResult(http.StatusBadRequest, "missing request_id")
 	}
 
+	raw, err := decodeBidiPayload(bidi)
+	if err != nil {
+		return errResult(http.StatusBadRequest, err.Error())
+	}
+	return applyBugBotBidiPayload(requestID, raw)
+}
+
+func applyBugBotBidiPayload(requestID string, raw []byte) Result {
 	sess := &Session{RequestID: requestID}
 	if existing := GetSession(requestID); existing != nil {
 		sess = existing
 	}
 
-	if bidi.Data != "" {
-		raw, err := hex.DecodeString(strings.TrimSpace(bidi.Data))
-		if err != nil {
-			return errResult(http.StatusBadRequest, "bugbot bidi data not hex: "+err.Error())
-		}
+	if len(raw) > 0 {
 		acm := &aiserverv1.StreamBugBotAgenticClientMessage{}
 		if err := proto.Unmarshal(raw, acm); err != nil {
 			return errResult(http.StatusBadRequest, "parse bugbot client message: "+err.Error())
@@ -139,7 +137,7 @@ func handleBugBotBidiAppendDecoded(bidi *aiserverv1.BidiAppendRequest) Result {
 			}
 		}
 		if execMsg := acm.GetExecClientMessage(); execMsg != nil {
-			routeBugBotExecClientResult(execMsg)
+			routeBugBotExecClientResult(requestID, execMsg)
 		}
 	}
 
@@ -267,33 +265,6 @@ func renderBugBotDiff(diff *aiserverv1.GitDiff) string {
 	return b.String()
 }
 
-func shouldRouteToBugBot(bidi *aiserverv1.BidiAppendRequest) bool {
-	if bidi == nil || bidi.GetData() == "" {
-		return false
-	}
-	requestID := ""
-	if bidi.RequestId != nil {
-		requestID = bidi.RequestId.GetRequestId()
-	}
-	if requestID != "" {
-		if sess := GetSession(requestID); sess != nil && sess.BugBotRequest != nil {
-			return true
-		}
-	}
-	raw, err := hex.DecodeString(strings.TrimSpace(bidi.GetData()))
-	if err != nil {
-		return false
-	}
-	acm := &aiserverv1.StreamBugBotAgenticClientMessage{}
-	if err := proto.Unmarshal(raw, acm); err != nil {
-		return false
-	}
-	// Only treat a brand-new BidiAppend as BugBot when it carries the explicit
-	// Start message. Exec-only payloads can false-positive because aiserver and
-	// agent protos both use field 2/3 for exec messages.
-	return acm.GetStart() != nil
-}
-
 // ---- Connect unary codec helpers ----
 
 // decodeUnary unmarshals a unary Connect request body into msg, transparently
@@ -323,14 +294,21 @@ func isConnectEnvelope(contentType string) bool {
 }
 
 func gunzip(b []byte) ([]byte, error) {
+	return gunzipLimit(b, bidiMaxQueuedBytes)
+}
+
+func gunzipLimit(b []byte, limit int64) ([]byte, error) {
 	zr, err := gzip.NewReader(bytes.NewReader(b))
 	if err != nil {
 		return nil, err
 	}
 	defer zr.Close()
-	out, err := io.ReadAll(zr)
+	out, err := io.ReadAll(io.LimitReader(zr, limit+1))
 	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
+	}
+	if int64(len(out)) > limit {
+		return nil, errors.New("decoded Connect request too large")
 	}
 	return out, nil
 }

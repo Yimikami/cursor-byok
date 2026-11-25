@@ -29,8 +29,8 @@ Keep API keys, auth tokens and conversation contents out of shared logs.
    text file to check an Agent read-file tool call.
 6. Cancel a response, then send another message. Both should complete without
    a repeating `/agent/v1/run` 404 or a permanently busy chat.
-7. Select **Stop**. Verify ordinary browsing and restart Cursor to confirm the
-   original account is available again.
+7. Fully quit Cursor, then select **Stop**. Verify ordinary browsing and reopen
+   Cursor to confirm the original account and model selection are available again.
 
 ## Failure recovery
 
@@ -49,6 +49,7 @@ If an older build has already left a dead manual proxy, inspect Windows proxy
 settings. Only disable the stale `127.0.0.1:18080` entry when cursor-byok is no
 longer running; preserve unrelated VPN/corporate settings and recovery files.
 
-Model-picker preferences are still pinned separately from the auth backup.
+Model-picker preferences have their own scoped recovery record,
+`cursor-model-backup.json`; unrelated preferences must survive restoration.
 Cursor 3.26.16, originally reported in issue #12, needs its own desktop check;
 the implemented WebSocket contract was inspected in Cursor 3.32.4.

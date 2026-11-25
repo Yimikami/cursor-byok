@@ -38,7 +38,7 @@ type bugBotReportItem struct {
 
 func HandleWriteGitCommitMessage(ctx context.Context, reqBody []byte, contentType string, resolve AdapterResolver, selectedModel string) Result {
 	req := &aiserverv1.WriteGitCommitMessageRequest{}
-	if err := decodeUnary(reqBody, contentType, req); err != nil {
+	if err := decodeNativeUnary(reqBody, contentType, req); err != nil {
 		return errResult(http.StatusBadRequest, "decode write git commit message: "+err.Error())
 	}
 	target, ok := ResolveAdapterForModel(resolve(), selectedModel)
@@ -50,11 +50,7 @@ func HandleWriteGitCommitMessage(ctx context.Context, reqBody []byte, contentTyp
 	if err != nil {
 		return errResult(http.StatusBadGateway, "generate commit message: "+err.Error())
 	}
-	body, err := proto.Marshal(&aiserverv1.WriteGitCommitMessageResponse{CommitMessage: message})
-	if err != nil {
-		return errResult(http.StatusInternalServerError, "marshal commit message response: "+err.Error())
-	}
-	return Result{Status: http.StatusOK, ContentType: "application/proto", Body: body}
+	return nativeUnaryResult(&aiserverv1.WriteGitCommitMessageResponse{CommitMessage: message}, contentType)
 }
 
 func HandleBugBotRunSSE(ctx context.Context, reqBody []byte, contentType string, rawWriter io.Writer, resolve AdapterResolver, selectedModel string) {
@@ -65,8 +61,20 @@ func HandleBugBotRunSSE(ctx context.Context, reqBody []byte, contentType string,
 		return
 	}
 	requestID := bid.GetRequestId()
+	ctx, detach, inputErrors, err := attachLegacyBidi(ctx, requestID, "bugbot", applyBugBotBidiPayload)
+	if err != nil {
+		writeBugBotEndStreamError(w, err.Error())
+		return
+	}
+	defer detach()
 	sess := WaitForSession(ctx, requestID)
 	if sess == nil || sess.BugBotRequest == nil {
+		select {
+		case err := <-inputErrors:
+			writeBugBotEndStreamError(w, err.Error())
+			return
+		default:
+		}
 		writeBugBotEndStreamError(w, "no bugbot session for request_id="+requestID)
 		return
 	}
@@ -125,6 +133,7 @@ func generateCommitMessage(ctx context.Context, req *aiserverv1.WriteGitCommitMe
 	fastOpts := opts
 	fastOpts.ReasoningEffort = ""
 	fastOpts.ServiceTier = ""
+	fastOpts.ThinkingBudget = 0
 	if fastOpts.MaxOutputTokens <= 0 || fastOpts.MaxOutputTokens > 120 {
 		fastOpts.MaxOutputTokens = 120
 	}
@@ -189,9 +198,11 @@ func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model 
 	}
 	tools := openAIToolsForRequest(sess)
 	var answer strings.Builder
+	finished := false
 	totalIterations := int32(bugBotMaxLoopRounds)
 	iterationsCompleted := int32(0)
 	for round := 0; round < bugBotMaxLoopRounds; round++ {
+		answer.Reset()
 		iterationsCompleted = int32(round + 1)
 		_ = writeBugBotResponseFrame(w, &aiserverv1.StreamBugBotResponse{
 			Status: &aiserverv1.BugBotStatus{
@@ -211,10 +222,23 @@ func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model 
 		if err != nil {
 			return nil, err
 		}
+		if result == nil {
+			return nil, fmt.Errorf("provider returned no review result")
+		}
+		if err := inferenceProviderStreamError(result); err != nil {
+			return nil, err
+		}
+		if result.FinishReason == "length" || result.FinishReason == "max_tokens" {
+			return nil, fmt.Errorf("provider reached the output limit before finishing the review")
+		}
 		if len(result.ToolCalls) == 0 {
+			finished = true
 			break
 		}
-		assistantMsg := openAIMessage{Role: "assistant"}
+		assistantMsg := openAIMessage{Role: "assistant", AnthropicContent: result.AnthropicContent}
+		if answer.Len() > 0 {
+			assistantMsg.Content = json.RawMessage(jsonString(answer.String()))
+		}
 		for _, tc := range result.ToolCalls {
 			assistantMsg.ToolCalls = append(assistantMsg.ToolCalls, openAIToolCallMsg{ID: tc.ID, Type: "function", Function: openAIToolCallFn{Name: tc.Name, Arguments: tc.Arguments}})
 		}
@@ -231,8 +255,9 @@ func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model 
 			}
 			execID := newExecID(execToolName(pc.Name))
 			seq := nextExecSeq()
-			waitCh := registerToolWait(pc.ID)
-			registerExecIDAlias(execID, seq, pc.ID)
+			waitCh := registerToolWait(sess.RequestID, pc.ID)
+			defer releaseToolWait(waitCh)
+			registerExecIDAlias(sess.RequestID, execID, seq, pc.ID)
 			if err := writeBugBotExecRequest(w, execID, seq, pc, tc); err != nil {
 				return nil, err
 			}
@@ -246,11 +271,14 @@ func runBugBotReview(ctx context.Context, sess *Session, baseURL, apiKey, model 
 			}
 			messages = append(messages, toolResultMessage(pc.ID, pc.Name, content))
 		}
-		if answer.Len() > 0 {
-			break
-		}
 	}
-	bugs, summary := parseBugBotResponse(answer.String())
+	if !finished {
+		return nil, fmt.Errorf("review exceeded the tool iteration limit without a final result")
+	}
+	bugs, summary, err := parseBugBotResponse(answer.String())
+	if err != nil {
+		return nil, err
+	}
 	status := &aiserverv1.BugBotStatus{Status: aiserverv1.BugBotStatus_STATUS_DONE, IterationsCompleted: &iterationsCompleted, TotalIterations: &totalIterations}
 	if len(bugs) == 0 {
 		status.Message = "No issues found"
@@ -328,19 +356,28 @@ func writeBugBotExecRequest(w io.Writer, execID string, execSeq uint32, pc Pendi
 func collectSingleResponse(ctx context.Context, stream providerStreamer, baseURL, apiKey, model string, opts AdapterOpts, messages []openAIMessage) (string, error) {
 	var mu sync.Mutex
 	var out strings.Builder
-	_, err := stream(ctx, baseURL, apiKey, model, messages, nil, opts, func(chunk string, reasoning string, done bool) error {
+	result, err := stream(ctx, baseURL, apiKey, model, messages, nil, opts, func(chunk string, reasoning string, done bool) error {
 		mu.Lock()
 		defer mu.Unlock()
-		if reasoning != "" {
-			return nil
-		}
 		if chunk != "" {
 			out.WriteString(chunk)
 		}
-		return nil
+		return ctx.Err()
 	})
 	if err != nil {
 		return "", err
+	}
+	if result == nil {
+		return "", fmt.Errorf("provider returned no result")
+	}
+	if err := inferenceProviderStreamError(result); err != nil {
+		return "", err
+	}
+	if result.FinishReason == "length" || result.FinishReason == "max_tokens" {
+		return "", fmt.Errorf("provider reached the output limit before finishing")
+	}
+	if len(result.ToolCalls) != 0 {
+		return "", fmt.Errorf("provider returned tool calls for a text-only request")
 	}
 	res := strings.TrimSpace(out.String())
 	if res == "" {
@@ -349,45 +386,43 @@ func collectSingleResponse(ctx context.Context, stream providerStreamer, baseURL
 	return res, nil
 }
 
-func parseBugBotResponse(answer string) ([]*aiserverv1.BugReport, string) {
-	trimmed := strings.TrimSpace(answer)
-	if trimmed == "" || strings.EqualFold(trimmed, "NO_ISSUES") {
-		return nil, "No issues found"
-	}
-	type wrapped struct {
-		Summary string `json:"summary"`
-		Bugs    []bugBotReportItem `json:"bugs"`
-		Issues  []bugBotReportItem `json:"issues"`
-		Reports []bugBotReportItem `json:"reports"`
+func parseBugBotResponse(answer string) ([]*aiserverv1.BugReport, string, error) {
+	trimmed := strings.TrimSpace(stripCodeFence(strings.TrimSpace(answer)))
+	if strings.EqualFold(trimmed, "NO_ISSUES") {
+		return nil, "No issues found", nil
 	}
 	var parsed []bugBotReportItem
-	if err := json.Unmarshal([]byte(extractJSONArray(trimmed)), &parsed); err != nil || len(parsed) == 0 {
-		var wrap wrapped
-		if err2 := json.Unmarshal([]byte(extractJSONObject(trimmed)), &wrap); err2 == nil {
-			switch {
-			case len(wrap.Bugs) > 0:
-				parsed = wrap.Bugs
-			case len(wrap.Issues) > 0:
-				parsed = wrap.Issues
-			case len(wrap.Reports) > 0:
-				parsed = wrap.Reports
-			}
-			if len(parsed) > 0 {
-				summary := strings.TrimSpace(wrap.Summary)
-				if summary == "" {
-					summary = fmt.Sprintf("Found %d issue(s)", len(parsed))
-				}
-				return toBugReports(parsed), summary
+	summary := ""
+	array := []byte(trimmed)
+	if strings.HasPrefix(trimmed, "{") {
+		var wrap map[string]json.RawMessage
+		if err := json.Unmarshal(array, &wrap); err != nil {
+			return nil, "", fmt.Errorf("provider returned malformed review JSON")
+		}
+		array = nil
+		for _, key := range []string{"bugs", "issues", "reports"} {
+			if value, ok := wrap[key]; ok {
+				array = value
+				break
 			}
 		}
-		return []*aiserverv1.BugReport{{
-			Id:          "bug-1",
-			Title:       protoString("Potential issue"),
-			Description: trimmed,
-			Severity:    protoString("medium"),
-		}}, "Found 1 issue"
+		_ = json.Unmarshal(wrap["summary"], &summary)
 	}
-	return toBugReports(parsed), fmt.Sprintf("Found %d issue(s)", len(parsed))
+	if len(array) == 0 || !strings.HasPrefix(strings.TrimSpace(string(array)), "[") || json.Unmarshal(array, &parsed) != nil {
+		return nil, "", fmt.Errorf("provider returned no valid review result; expected an issue array or NO_ISSUES")
+	}
+	for _, report := range parsed {
+		if strings.TrimSpace(report.Description) == "" {
+			return nil, "", fmt.Errorf("provider returned an issue without a description")
+		}
+	}
+	if len(parsed) == 0 {
+		return nil, "No issues found", nil
+	}
+	if strings.TrimSpace(summary) == "" {
+		summary = fmt.Sprintf("Found %d issue(s)", len(parsed))
+	}
+	return toBugReports(parsed), summary, nil
 }
 
 func toBugReports(parsed []bugBotReportItem) []*aiserverv1.BugReport {
@@ -495,13 +530,13 @@ func writeBugBotStatusFrame(w io.Writer, status aiserverv1.BugBotStatus_Status, 
 
 func writeBugBotEndStreamError(w io.Writer, msg string) {
 	_ = writeBugBotResponseFrame(w, &aiserverv1.StreamBugBotResponse{
-		Status: &aiserverv1.BugBotStatus{Status: aiserverv1.BugBotStatus_STATUS_ERROR, Message: msg},
+		Status:  &aiserverv1.BugBotStatus{Status: aiserverv1.BugBotStatus_STATUS_ERROR, Message: msg},
 		Summary: protoString(msg),
 	})
 	_ = writeEndStream(w)
 }
 
-func routeBugBotExecClientResult(msg *aiserverv1.ExecClientMessage) {
+func routeBugBotExecClientResult(owner string, msg *aiserverv1.ExecClientMessage) {
 	if msg == nil {
 		return
 	}
@@ -511,16 +546,16 @@ func routeBugBotExecClientResult(msg *aiserverv1.ExecClientMessage) {
 	}
 	env := &toolResultEnvelope{ResultJSON: string(body), Error: ""}
 	if execID := msg.GetExecId(); execID != "" {
-		deliverToolResult(execID, env)
+		deliverToolResult(owner, execID, env)
 		return
 	}
 	pendingMu.Lock()
-	callID := seqAlias[msg.GetId()]
+	callID := seqAlias[sequenceWaitKey{owner, msg.GetId()}]
 	if callID != "" {
-		delete(seqAlias, msg.GetId())
+		delete(seqAlias, sequenceWaitKey{owner, msg.GetId()})
 	}
 	pendingMu.Unlock()
 	if callID != "" {
-		deliverToolResult(callID, env)
+		deliverToolResult(owner, callID, env)
 	}
 }

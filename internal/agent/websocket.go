@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 
@@ -19,9 +20,10 @@ import (
 // WebSocket v1 envelope fields were verified against Cursor 3.32.4's
 // cursor-always-local/dist/254.js. See docs/agent-websocket.md. These small
 // transport envelopes contain the existing AgentClient/ServerMessage protos.
-// Header lists and unknown fields are skipped for forward compatibility.
+// Run-start headers carry native authorization; unknown fields are skipped.
 type socketFrame struct {
 	kind             protowire.Number
+	headers          http.Header
 	runID, requestID string
 	sequence         uint64
 	payload          []byte
@@ -90,6 +92,30 @@ func decodeSocketFrame(b []byte) (socketFrame, error) {
 					}
 					return nil
 				})
+			case num == 2 && n == 2:
+				if t != protowire.BytesType {
+					return errors.New("invalid run header")
+				}
+				var name, value string
+				if err := wireFields(d, func(i protowire.Number, it protowire.Type, id []byte, _ uint64) error {
+					if i == 1 || i == 2 {
+						if it != protowire.BytesType {
+							return errors.New("invalid run header field")
+						}
+						if i == 1 {
+							name = string(id)
+						} else {
+							value = string(id)
+						}
+					}
+					return nil
+				}); err != nil {
+					return err
+				}
+				if f.headers == nil {
+					f.headers = make(http.Header)
+				}
+				f.headers.Add(name, value)
 			case num >= 3 && n == 1:
 				if t != protowire.BytesType {
 					return errors.New("invalid run id")
@@ -204,7 +230,7 @@ func (w *socketWriter) end(code, message string) {
 // HandleAgentWebSocket serves one run per connection. The client only reuses
 // sockets when RunEnd explicitly includes a sequential-v1 trailer; we omit it.
 // Cold connections and cursor-agent-preconnect-v1 use the same hello handshake.
-func HandleAgentWebSocket(ctx context.Context, conn *websocket.Conn, resolve AdapterResolver) {
+func HandleAgentWebSocket(ctx context.Context, conn *websocket.Conn, resolve AdapterResolver, authorize func(http.Header) bool) {
 	defer conn.CloseNow()
 	conn.SetReadLimit(32 << 20)
 	read := func(ctx context.Context) (socketFrame, error) {
@@ -233,10 +259,20 @@ func HandleAgentWebSocket(ctx context.Context, conn *websocket.Conn, resolve Ada
 		return
 	}
 	identity := socketIdentity(start.runID, start.requestID)
+	if authorize == nil || !authorize(start.headers) {
+		connectErr := wireBytes(wireUint(nil, 1, 16), 2, []byte("Local inference requires the current Cursor account."))
+		rejected := wireBytes(wireBytes(nil, 1, identity), 2, connectErr)
+		_ = conn.Write(ctx, websocket.MessageBinary, wireBytes(nil, 5, rejected))
+		return
+	}
 	if err = conn.Write(ctx, websocket.MessageBinary, wireBytes(nil, 2, wireBytes(nil, 1, identity))); err != nil {
 		return
 	}
 	writer := &socketWriter{ctx: ctx, conn: conn, runID: start.runID, identity: identity}
+	if isInferenceProtocol(conn.Subprotocol()) {
+		handleInferenceSocket(ctx, conn, start, writer, resolve, read)
+		return
+	}
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 	type incoming struct {
@@ -308,9 +344,9 @@ func HandleAgentWebSocket(ctx context.Context, conn *websocket.Conn, resolve Ada
 					writer.end("invalid_argument", "run already started")
 					return
 				}
-				routeExecClientResult(msg)
+				routeExecClientResult(sess.RequestID, msg)
 				if ir := msg.GetInteractionResponse(); ir != nil {
-					deliverInteractionResponse(ir)
+					deliverInteractionResponse(sess.RequestID, ir)
 				}
 			case 4:
 				halfClosed = true

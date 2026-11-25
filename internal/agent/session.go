@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -89,11 +90,12 @@ type ConvTurn struct {
 // and openai.go's openAIMessage uses json.RawMessage for Content which doesn't
 // round-trip cleanly. Content here is always the string form.
 type StoredMessage struct {
-	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
-	ToolCallID string           `json:"tool_call_id,omitempty"`
-	Name       string           `json:"name,omitempty"`
-	ToolCalls  []StoredToolCall `json:"tool_calls,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content,omitempty"`
+	ToolCallID       string           `json:"tool_call_id,omitempty"`
+	Name             string           `json:"name,omitempty"`
+	ToolCalls        []StoredToolCall `json:"tool_calls,omitempty"`
+	AnthropicContent json.RawMessage  `json:"anthropic_native_content,omitempty"`
 }
 
 type StoredToolCall struct {

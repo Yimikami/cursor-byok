@@ -43,9 +43,10 @@ func testLifecycle(t *testing.T) (*ProxyService, *[]string, map[string]error) {
 			},
 			applyTweaks:  func(string) error { return run("settings") },
 			revertTweaks: func() error { return run("restore-settings") },
-			injectAuth:   func(string) error { return run("auth") },
+			prepareAuth:  func(string) error { return run("auth") },
 			restoreAuth:  func(string) error { return run("restore-auth") },
 			selectModel:  func(string) error { return run("model") },
+			restoreModel: func(string) error { return run("restore-model") },
 			enableProxy:  func(string) error { return run("proxy") },
 			disableProxy: func() error { return run("restore-proxy") },
 		},
@@ -94,8 +95,8 @@ func TestStartProxyRollsBackEachFailedStep(t *testing.T) {
 		{"listen", []string{"create", "listen"}},
 		{"settings", []string{"create", "listen", "settings", "restore-settings", "close"}},
 		{"auth", []string{"create", "listen", "settings", "auth", "restore-settings", "restore-auth", "close"}},
-		{"model", []string{"create", "listen", "settings", "auth", "model", "restore-settings", "restore-auth", "close"}},
-		{"proxy", []string{"create", "listen", "settings", "auth", "model", "proxy", "restore-proxy", "restore-settings", "restore-auth", "close"}},
+		{"model", []string{"create", "listen", "settings", "auth", "model", "restore-settings", "restore-model", "restore-auth", "close"}},
+		{"proxy", []string{"create", "listen", "settings", "auth", "model", "proxy", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}},
 	} {
 		t.Run(tt.step, func(t *testing.T) {
 			s, events, failures := testLifecycle(t)
@@ -124,7 +125,7 @@ func TestFailedProxyRollbackKeepsListenerUntilStopRetry(t *testing.T) {
 }
 
 func TestStopRestorationFailureCanBeRetried(t *testing.T) {
-	for _, step := range []string{"restore-proxy", "restore-settings", "restore-auth"} {
+	for _, step := range []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"} {
 		t.Run(step, func(t *testing.T) {
 			s, events, failures := testLifecycle(t)
 			if _, err := s.StartProxy(); err != nil {
@@ -133,16 +134,73 @@ func TestStopRestorationFailureCanBeRetried(t *testing.T) {
 			*events = nil
 			failures[step] = errors.New("temporarily denied")
 			state, err := s.StopProxy()
-			want := []string{"restore-proxy", "restore-settings", "restore-auth"}
-			if err == nil || !state.Running || !reflect.DeepEqual(*events, want) {
+			want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"}
+			routingPending := step == "restore-proxy" || step == "restore-settings"
+			if !routingPending {
+				want = append(want, "close")
+			}
+			if err == nil || state.Running != routingPending || !s.recoveryPending || !reflect.DeepEqual(*events, want) {
 				t.Fatalf("state=%+v err=%v events=%v", state, err, *events)
 			}
 			delete(failures, step)
+			*events = nil
 			state, err = s.StopProxy()
-			if err != nil || state.Running || state.LastError != "" || (*events)[len(*events)-1] != "close" {
+			want = []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"}
+			if routingPending {
+				want = append(want, "close")
+			}
+			if err != nil || state.Running || s.recoveryPending || state.LastError != "" || !reflect.DeepEqual(*events, want) {
 				t.Fatalf("state=%+v err=%v events=%v", state, err, *events)
 			}
 		})
+	}
+}
+
+func TestStartAfterFailedStopRecoversThenReappliesRouting(t *testing.T) {
+	for _, failure := range []string{"restore-model", "restore-proxy"} {
+		t.Run(failure, func(t *testing.T) {
+			s, events, failures := testLifecycle(t)
+			if _, err := s.StartProxy(); err != nil {
+				t.Fatal(err)
+			}
+			failures[failure] = errors.New("temporarily denied")
+			if _, err := s.StopProxy(); err == nil {
+				t.Fatal("expected incomplete Stop")
+			}
+			*events = nil
+			if _, err := s.StartProxy(); err == nil {
+				t.Fatal("Start reported success despite pending recovery")
+			}
+			want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"}
+			if !reflect.DeepEqual(*events, want) {
+				t.Fatalf("Start applied settings before recovery: %v", *events)
+			}
+			delete(failures, failure)
+			*events = nil
+			state, err := s.StartProxy()
+			if failure == "restore-proxy" {
+				want = append(want, "close")
+			}
+			want = append(want, "create", "listen", "settings", "auth", "model", "proxy")
+			if err != nil || !state.Running || s.recoveryPending || !reflect.DeepEqual(*events, want) {
+				t.Fatalf("did not reapply routing after recovery: state=%+v err=%v events=%v", state, err, *events)
+			}
+		})
+	}
+}
+
+func TestFailedStartWithModelRecoveryPendingClosesUnusedListener(t *testing.T) {
+	s, events, failures := testLifecycle(t)
+	failures["model"] = errors.New("model pin failed")
+	failures["restore-model"] = errors.New("model backup removal denied")
+	state, err := s.StartProxy()
+	if err == nil || state.Running || !s.recoveryPending || s.proxy != nil || (*events)[len(*events)-1] != "close" {
+		t.Fatalf("model-only rollback left an active service: state=%+v err=%v events=%v", state, err, *events)
+	}
+	delete(failures, "restore-model")
+	state, err = s.StopProxy()
+	if err != nil || state.Running || s.recoveryPending {
+		t.Fatalf("stopped recovery was not retryable: state=%+v err=%v", state, err)
 	}
 }
 
@@ -166,7 +224,7 @@ func TestSuccessfulLifecycleNotifiesOutsideLock(t *testing.T) {
 	if _, err := s.StopProxy(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "listen", "settings", "auth", "model", "proxy", "restore-proxy", "restore-settings", "restore-auth", "close"}
+	want := []string{"create", "listen", "settings", "auth", "model", "proxy", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}
 	if !reflect.DeepEqual(*events, want) || !reflect.DeepEqual(notified, []bool{true, false}) {
 		t.Fatalf("events=%v notified=%v", *events, notified)
 	}
@@ -176,7 +234,7 @@ func TestInterruptedSessionRecoveryAttemptsAllRestorations(t *testing.T) {
 	s, events, failures := testLifecycle(t)
 	failures["restore-proxy"] = errors.New("locked registry")
 	err := RecoverInterruptedSession(s)
-	want := []string{"restore-proxy", "restore-settings", "restore-auth"}
+	want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"}
 	if err == nil || s.state.Running || s.state.LastError == "" || !reflect.DeepEqual(*events, want) {
 		t.Fatalf("state=%+v err=%v events=%v", s.state, err, *events)
 	}
@@ -214,7 +272,7 @@ func TestStoppedRecoveryCanBeRetried(t *testing.T) {
 	}
 	*events = nil
 	state, err := s.StopProxy()
-	want := []string{"restore-proxy", "restore-settings", "restore-auth"}
+	want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"}
 	if err == nil || state.Running || !s.recoveryPending || !reflect.DeepEqual(*events, want) {
 		t.Fatalf("state=%+v err=%v pending=%v events=%v", state, err, s.recoveryPending, *events)
 	}
@@ -233,7 +291,7 @@ func TestStartRetriesPendingRecoveryBeforeNewOverrides(t *testing.T) {
 	}
 	*events = nil
 	state, err := s.StartProxy()
-	want := []string{"restore-proxy", "restore-settings", "restore-auth"}
+	want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth"}
 	if err == nil || state.Running || !reflect.DeepEqual(*events, want) {
 		t.Fatalf("state=%+v err=%v events=%v", state, err, *events)
 	}
