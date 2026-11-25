@@ -148,7 +148,8 @@ func buildAvailableModel(hexID, display string, supportedThinkingLevels []string
 	out = appendString(out, 24, display)
 	// 25: supports_sandboxing (varint) = true
 	out = appendBool(out, 25, true)
-	// 38: BYOK-eligible flag (varint = 1).
+	// 38: named_model_section_index = 1 (Cursor 3.32.4); this is a picker
+	// section index, not an entitlement or BYOK authorization flag.
 	out = appendBool(out, 38, true)
 
 	if len(supportedThinkingLevels) > 0 {

@@ -1,6 +1,7 @@
 package certs
 
 import (
+	"crypto/x509"
 	"errors"
 	"path/filepath"
 	"reflect"
@@ -41,13 +42,15 @@ func TestMacTrustChecksTrustInsteadOfPresence(t *testing.T) {
 	}
 	path := filepath.Join(ca.Dir(), "ca.crt")
 	run := func(name string, args ...string) ([]byte, error) {
-		want := []string{"verify-cert", "-q", "-L", "-l", "-p", "basic", "-c", path}
+		want := []string{"verify-cert", "-q", "-L", "-l", "-p", "ssl", "-c", path}
 		if name != "security" || !reflect.DeepEqual(args, want) {
 			t.Fatalf("command: %s %v", name, args)
 		}
 		return nil, errors.New("certificate exists but is untrusted")
 	}
-	if isInstalledUserRoot("darwin", path, run) {
+	if isDarwinRootTrusted(path, ca.Cert, func(*x509.Certificate, darwinTrustDomain) (darwinTrustRecord, error) {
+		return darwinTrustRecord{present: true, ssl: 1}, nil
+	}, run) {
 		t.Fatal("untrusted keychain certificate accepted")
 	}
 }
