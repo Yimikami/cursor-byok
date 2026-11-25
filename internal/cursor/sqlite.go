@@ -1,37 +1,39 @@
 package cursor
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
 
 	_ "modernc.org/sqlite"
 )
 
 const reactiveStorageKey = "src.vs.platform.reactivestorage.browser.reactiveStorageServiceImpl.persistentStorage.applicationUser"
 
-// fakeProSessionJWT is a hand-crafted JWT that Cursor IDE accepts as a valid
-// session token. The IDE never validates the HMAC signature locally — it only
-// base64-decodes the payload to render the email and "logged in" state. The
-// real validation happens against api2.cursor.sh, which we MITM and answer
-// with a synthetic Pro-membership response.
+// fakeProSessionJWT identifies the local-only token written by older releases.
+// It is retained only to restore/clear legacy state and block upstream use.
+// New sessions preserve real Cursor credentials and never create this token.
 //
 // Payload: {"sub":"fake-cursor-local-user","email":"cursor@ai.com",
-//           "type":"session","iss":"cursor-client",
-//           "scope":"openid profile email","exp":4070908800}
+//
+//	"type":"session","iss":"cursor-client",
+//	"scope":"openid profile email","exp":4070908800}
+//
 // Extracted byte-for-byte from the working closed-source app (Linux v0.0.4).
 const fakeProSessionJWT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmYWtlLWN1cnNvci1sb2NhbC11c2VyIiwiZW1haWwiOiJjdXJzb3JAYWkuY29tIiwidHlwZSI6InNlc3Npb24iLCJpc3MiOiJjdXJzb3ItY2xpZW50Iiwic2NvcGUiOiJvcGVuaWQgcHJvZmlsZSBlbWFpbCIsImV4cCI6NDA3MDkwODgwMH0.fake-local-state-token"
 
 const fakeProEmail = "cursor@ai.com"
 
-// fakeAuthKeys lists the cursorAuth/* keys we overwrite with fake-Pro
-// values. We back up whatever was there before so we can restore it when
-// the proxy stops — otherwise Cursor would keep sending our fake JWT to
-// the real api2.cursor.sh after the user disables our proxy and get back
-// ERROR_NOT_LOGGED_IN on every call.
+// fakeAuthKeys lists the auth fields owned by older releases. Keep the list
+// exact so migration restores only our previous overrides, leaving other
+// user settings untouched.
 var fakeAuthKeys = []string{
 	"cursorAuth/accessToken",
 	"cursorAuth/refreshToken",
@@ -40,180 +42,228 @@ var fakeAuthKeys = []string{
 	"cursorAuth/stripeMembershipType",
 }
 
-// InjectFakeProUser overwrites Cursor's cursorAuth/* keys with the fake
-// Pro session and persists the previous values to backupPath. If a backup
-// already exists (i.e. we ran before without a clean Restore), we leave
-// the existing backup untouched so the original user data isn't lost.
-func InjectFakeProUser(backupPath string) error {
-	dbPath := stateDBPath()
-	if dbPath == "" {
-		return fmt.Errorf("could not resolve Cursor state.vscdb path")
+var stateMu sync.Mutex
+
+// IsLocalSessionToken recognizes this application's local-only fallback.
+// It must never be forwarded as a genuine credential to Cursor's services.
+func IsLocalSessionToken(token string) bool {
+	return strings.TrimSpace(token) == fakeProSessionJWT
+}
+
+// PrepareCursorAuth preserves every field of an existing Cursor account and
+// requires a real sign-in. Older local-session backups are restored solely as
+// a migration; new sessions never fabricate an account or subscription.
+func PrepareCursorAuth(backupPath string) error {
+	return prepareCursorAuthAt(stateDBPath(), backupPath)
+}
+
+func prepareCursorAuthAt(dbPath, backupPath string) error {
+	if err := restoreFakeProUserAt(dbPath, backupPath); err != nil {
+		return err
 	}
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil
-	}
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout=2000")
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	db, err := openCursorDB(dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-
-	if backupPath != "" {
-		if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
-			backup := map[string]*string{}
-			alreadyFake := false
-			for _, key := range fakeAuthKeys {
-				var v string
-				row := db.QueryRow("SELECT value FROM ItemTable WHERE key = ?", key)
-				switch err := row.Scan(&v); err {
-				case nil:
-					vv := v
-					backup[key] = &vv
-					if key == "cursorAuth/accessToken" && v == fakeProSessionJWT {
-						alreadyFake = true
-					}
-				case sql.ErrNoRows:
-					backup[key] = nil // sentinel = key didn't exist
-				default:
-					return fmt.Errorf("backup read %s: %w", key, err)
-				}
-			}
-			// The current SQLite already holds our fake session — most
-			// likely a previous Start crashed without a clean Stop. Saving
-			// these as "original" would leave the user permanently logged
-			// in as cursor@ai.com after Stop, so we instead persist a
-			// "delete on restore" marker for every key and let the user
-			// log into Cursor manually after the next Stop.
-			if alreadyFake {
-				for _, key := range fakeAuthKeys {
-					backup[key] = nil
-				}
-			}
-			data, jerr := json.MarshalIndent(backup, "", "  ")
-			if jerr != nil {
-				return jerr
-			}
-			if werr := os.WriteFile(backupPath, data, 0o600); werr != nil {
-				return fmt.Errorf("write backup: %w", werr)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var token string
+	err = tx.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/accessToken").Scan(&token)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("read current Cursor account: %w", err)
+	}
+	if IsLocalSessionToken(token) {
+		// An unbacked legacy fake is not an account we can recover. Remove
+		// only its known owned fields so Cursor can perform a normal sign-in.
+		for _, key := range fakeAuthKeys {
+			if _, err := tx.Exec("DELETE FROM ItemTable WHERE key = ?", key); err != nil {
+				return fmt.Errorf("remove legacy local session: %w", err)
 			}
 		}
-	}
-
-	pairs := [][2]string{
-		{"cursorAuth/accessToken", fakeProSessionJWT},
-		{"cursorAuth/refreshToken", fakeProSessionJWT},
-		{"cursorAuth/cachedEmail", fakeProEmail},
-		{"cursorAuth/cachedSignUpType", "Auth"},
-		{"cursorAuth/stripeMembershipType", "pro"},
-	}
-	for _, kv := range pairs {
-		if _, err := db.Exec(
-			"INSERT INTO ItemTable(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-			kv[0], kv[1],
-		); err != nil {
-			return fmt.Errorf("upsert %s: %w", kv[0], err)
+		if err := tx.Commit(); err != nil {
+			return err
 		}
-	}
-	return nil
-}
-
-// RestoreFakeProUser puts the original cursorAuth/* values back so Cursor
-// can authenticate normally again after our proxy is stopped. Reads the
-// JSON sidecar produced by InjectFakeProUser and removes it on success.
-// A nil entry in the sidecar means the key didn't exist before — we delete
-// it rather than recreate empty.
-func RestoreFakeProUser(backupPath string) error {
-	if backupPath == "" {
+	} else if strings.TrimSpace(token) != "" {
 		return nil
 	}
-	data, err := os.ReadFile(backupPath)
+	return errors.New("sign in to Cursor with your real account, then quit Cursor and start the service again")
+}
+
+// RestoreFakeProUser restores only the auth keys owned by this service. The
+// entire restore is transactional, and its backup is retained on any failure.
+func RestoreFakeProUser(backupPath string) error {
+	return restoreFakeProUserAt(stateDBPath(), backupPath)
+}
+
+func restoreFakeProUserAt(dbPath, backupPath string) error {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	backup, err := readAuthBackup(backupPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
 		return err
+	}
+	db, err := openCursorDB(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// A retained sidecar can outlive a completed restore (for example, its
+	// deletion was denied). Do not replay that old account over a newer login
+	// or logout. Matching the backed-up token still permits repairing an older
+	// version's partially completed restore of the other auth keys.
+	var currentToken string
+	tokenErr := tx.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/accessToken").Scan(&currentToken)
+	if tokenErr != nil && !errors.Is(tokenErr, sql.ErrNoRows) {
+		return fmt.Errorf("read current auth session: %w", tokenErr)
+	}
+	hasToken := tokenErr == nil
+	originalToken := backup["cursorAuth/accessToken"]
+	matchesBackup := (!hasToken && originalToken == nil) || (hasToken && originalToken != nil && currentToken == *originalToken)
+	if (!hasToken || !IsLocalSessionToken(currentToken)) && !matchesBackup {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return removeStateBackup(backupPath)
+	}
+	for _, key := range fakeAuthKeys {
+		value := backup[key]
+		if value == nil {
+			_, err = tx.Exec("DELETE FROM ItemTable WHERE key = ?", key)
+		} else {
+			_, err = tx.Exec("INSERT INTO ItemTable(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", key, *value)
+		}
+		if err != nil {
+			return fmt.Errorf("restore %s: %w", key, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return removeStateBackup(backupPath)
+}
+
+func readAuthBackup(path string) (map[string]*string, error) {
+	if path == "" {
+		return nil, errors.New("auth backup path is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
 	}
 	var backup map[string]*string
 	if err := json.Unmarshal(data, &backup); err != nil {
-		return fmt.Errorf("parse backup: %w", err)
+		return nil, fmt.Errorf("parse auth backup: %w", err)
 	}
-	dbPath := stateDBPath()
-	if dbPath == "" {
-		return fmt.Errorf("could not resolve Cursor state.vscdb path")
+	if len(backup) != len(fakeAuthKeys) {
+		return nil, errors.New("auth backup has unexpected or missing keys")
 	}
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil
+	for _, key := range fakeAuthKeys {
+		if _, ok := backup[key]; !ok {
+			return nil, fmt.Errorf("auth backup is missing %s", key)
+		}
 	}
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout=2000")
+	return backup, nil
+}
+
+func openCursorDB(path string) (*sql.DB, error) {
+	if path == "" {
+		return nil, errors.New("could not resolve Cursor state.vscdb path")
+	}
+	if info, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("open Cursor state.vscdb (open Cursor once to initialize it): %w", err)
+	} else if info.IsDir() {
+		return nil, errors.New("Cursor state.vscdb is a directory")
+	}
+	return sql.Open("sqlite", path+"?_pragma=busy_timeout=2000")
+}
+
+// Persist and sync the complete backup before publishing its final name.
+// A no-replace hard link preserves the first snapshot across repeated starts;
+// a crash during the write can leave only an ignored temporary file.
+func writeStateBackup(path string, value any) error {
+	return writeStateBackupWithPublish(path, value, os.Link)
+}
+
+func writeStateBackupWithPublish(path string, value any, publish func(string, string) error) error {
+	if path == "" {
+		return errors.New("backup path is required")
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	for key, val := range backup {
-		if val == nil {
-			if _, err := db.Exec("DELETE FROM ItemTable WHERE key = ?", key); err != nil {
-				return fmt.Errorf("restore delete %s: %w", key, err)
-			}
-			continue
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create backup: %w", err)
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	_, writeErr := file.Write(data)
+	if writeErr == nil {
+		writeErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		return fmt.Errorf("persist backup: %w", err)
+	}
+	if err := publish(temporary, path); err != nil {
+		return fmt.Errorf("publish backup: %w", err)
+	}
+	// Directory fsync makes the published link durable before SQLite changes.
+	// Windows does not support File.Sync on an open directory handle.
+	if runtime.GOOS != "windows" {
+		dir, err := os.Open(filepath.Dir(path))
+		if err != nil {
+			return err
 		}
-		if _, err := db.Exec(
-			"INSERT INTO ItemTable(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-			key, *val,
-		); err != nil {
-			return fmt.Errorf("restore upsert %s: %w", key, err)
+		syncErr := dir.Sync()
+		if err := errors.Join(syncErr, dir.Close()); err != nil {
+			return fmt.Errorf("sync backup directory: %w", err)
 		}
 	}
-	_ = os.Remove(backupPath)
 	return nil
 }
 
-// ForceModelSelection rewrites Cursor's locally cached model preferences so
-// that every chat / agent / cmd-K feature points at the supplied BYOK hex
-// model ID. Without this Cursor's picker keeps showing whatever model name
-// was cached from a previous session — even if our AvailableModels rewrite
-// announces a new id, the picker treats the cached selection as the source
-// of truth and renders nothing when it doesn't match.
-//
-// The structure mirrors what the closed-source working app leaves in SQLite
-// after a successful chat session.
-func ForceModelSelection(byokHexID string) error {
-	if byokHexID == "" {
-		return nil
+func removeStateBackup(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove restored backup: %w", err)
 	}
-	dbPath := stateDBPath()
-	if dbPath == "" {
-		return fmt.Errorf("could not resolve Cursor state.vscdb path")
-	}
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil // Cursor not installed yet
-	}
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout=2000")
-	if err != nil {
-		return err
-	}
-	defer db.Close()
+	return nil
+}
 
-	var raw string
-	if err := db.QueryRow("SELECT value FROM ItemTable WHERE key = ?", reactiveStorageKey).Scan(&raw); err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return err
+func decodeApplicationUser(data []byte) (map[string]any, error) {
+	var value map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return nil, fmt.Errorf("applicationUser JSON parse: %w", err)
 	}
-	var d map[string]any
-	if err := json.Unmarshal([]byte(raw), &d); err != nil {
-		return fmt.Errorf("applicationUser JSON parse: %w", err)
+	if value == nil {
+		return nil, errors.New("applicationUser must be a JSON object")
 	}
-
-	rewriteAiSettings(d, byokHexID)
-	rewriteFeatureModelConfigs(d, byokHexID)
-
-	out, err := json.Marshal(d)
-	if err != nil {
-		return err
+	// Unmarshal validates that there is no trailing JSON without converting
+	// numbers in the result, preserving unrelated large integer preferences.
+	if !json.Valid(data) {
+		return nil, errors.New("applicationUser is not valid JSON")
 	}
-	_, err = db.Exec("UPDATE ItemTable SET value = ? WHERE key = ?", string(out), reactiveStorageKey)
-	return err
+	return value, nil
 }
 
 func rewriteAiSettings(d map[string]any, hexID string) {
@@ -229,15 +279,14 @@ func rewriteAiSettings(d map[string]any, hexID string) {
 		ai["modelConfig"] = mc
 	}
 
-	// Features the working app pins to the BYOK model. background-composer is
-	// deliberately left at "default" — that's how the working app does it.
+	// Pin only locally executed features. Cloud background agents retain
+	// their native account-supported selections, including an absent setting.
 	features := []string{"cmd-k", "composer", "composer-ensemble", "plan-execution", "spec", "deep-search", "quick-agent"}
 	for _, f := range features {
-		entry := map[string]any{
-			"modelName":      hexID,
-			"maxMode":        false,
-			"selectedModels": nil,
-		}
+		entry := ensurePreferenceObject(mc, f)
+		entry["modelName"] = hexID
+		entry["maxMode"] = false
+		entry["selectedModels"] = nil
 		if f == "composer" {
 			entry["selectedModels"] = []any{
 				map[string]any{
@@ -247,13 +296,6 @@ func rewriteAiSettings(d map[string]any, hexID string) {
 			}
 		}
 		mc[f] = entry
-	}
-	if _, ok := mc["background-composer"]; !ok {
-		mc["background-composer"] = map[string]any{
-			"modelName":      "default",
-			"maxMode":        true,
-			"selectedModels": nil,
-		}
 	}
 
 	ai["modelOverrideEnabled"] = []any{}
@@ -278,10 +320,9 @@ func rewriteFeatureModelConfigs(d map[string]any, hexID string) {
 	}
 	hexList := []any{hexID}
 	pinFull := func(name string, withBestOfN bool) {
-		entry := map[string]any{
-			"defaultModel":   hexID,
-			"fallbackModels": hexList,
-		}
+		entry := ensurePreferenceObject(fmc, name)
+		entry["defaultModel"] = hexID
+		entry["fallbackModels"] = hexList
 		if withBestOfN {
 			entry["bestOfNDefaultModels"] = hexList
 		} else {
@@ -290,15 +331,13 @@ func rewriteFeatureModelConfigs(d map[string]any, hexID string) {
 		fmc[name] = entry
 	}
 	pinDefaultOnly := func(name string) {
-		fmc[name] = map[string]any{
-			"defaultModel":         hexID,
-			"fallbackModels":       []any{},
-			"bestOfNDefaultModels": []any{},
-		}
+		entry := ensurePreferenceObject(fmc, name)
+		entry["defaultModel"] = hexID
+		entry["fallbackModels"] = []any{}
+		entry["bestOfNDefaultModels"] = []any{}
 	}
 	pinFull("composer", true)
 	pinFull("cmdK", false)
-	pinFull("backgroundComposer", true)
 	pinFull("planExecution", false)
 	pinDefaultOnly("spec")
 	pinDefaultOnly("deepSearch")

@@ -722,9 +722,10 @@ func systemPromptFor(mode agentv1.AgentMode) string {
 // their intermediate tool_calls + tool results to the plain-text fallback.
 func storedToOpenAI(m StoredMessage) openAIMessage {
 	out := openAIMessage{
-		Role:       m.Role,
-		ToolCallID: m.ToolCallID,
-		Name:       m.Name,
+		Role:             m.Role,
+		ToolCallID:       m.ToolCallID,
+		Name:             m.Name,
+		AnthropicContent: append(json.RawMessage(nil), m.AnthropicContent...),
 	}
 	if m.Content != "" {
 		raw, _ := json.Marshal(m.Content)
@@ -749,9 +750,10 @@ func storedToOpenAI(m StoredMessage) openAIMessage {
 // unwrapped from json.RawMessage back to a plain string for compact storage.
 func openAIToStored(m openAIMessage) StoredMessage {
 	out := StoredMessage{
-		Role:       m.Role,
-		ToolCallID: m.ToolCallID,
-		Name:       m.Name,
+		Role:             m.Role,
+		ToolCallID:       m.ToolCallID,
+		Name:             m.Name,
+		AnthropicContent: append(json.RawMessage(nil), m.AnthropicContent...),
 	}
 	if len(m.Content) > 0 {
 		var s string

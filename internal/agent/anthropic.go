@@ -72,8 +72,20 @@ type anthropicThinking struct {
 }
 
 type anthropicMessage struct {
-	Role    string                  `json:"role"` // "user" | "assistant"
-	Content []anthropicContentBlock `json:"content"`
+	Role          string                  `json:"role"` // "user" | "assistant"
+	Content       []anthropicContentBlock `json:"content"`
+	NativeContent json.RawMessage         `json:"-"`
+}
+
+func (m anthropicMessage) MarshalJSON() ([]byte, error) {
+	if len(m.NativeContent) > 0 {
+		return json.Marshal(struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		}{m.Role, m.NativeContent})
+	}
+	type plain anthropicMessage
+	return json.Marshal(plain(m))
 }
 
 // anthropicContentBlock is the union of every content block variant we
@@ -99,15 +111,15 @@ type anthropicContentBlock struct {
 	// image
 	Source *anthropicImageSource `json:"source,omitempty"`
 
-	// thinking (round-trip summary of extended-thinking output we emitted
-	// in a previous turn — not something we actually send back, but left
-	// here so we can deserialise if a provider echoes it)
+	// Signed thinking and opaque redacted thinking are preserved for replay
+	// alongside tool results in the next Messages API invocation.
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 type anthropicImageSource struct {
-	Type      string `json:"type"`       // "base64" | "url"
+	Type      string `json:"type"` // "base64" | "url"
 	MediaType string `json:"media_type,omitempty"`
 	Data      string `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
@@ -134,13 +146,13 @@ type anthropicStreamEvent struct {
 }
 
 type anthropicStreamMessage struct {
-	ID           string            `json:"id"`
-	Type         string            `json:"type"`
-	Role         string            `json:"role"`
-	Model        string            `json:"model"`
-	StopReason   string            `json:"stop_reason"`
-	StopSequence string            `json:"stop_sequence"`
-	Usage        *anthropicUsage   `json:"usage,omitempty"`
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	Role         string          `json:"role"`
+	Model        string          `json:"model"`
+	StopReason   string          `json:"stop_reason"`
+	StopSequence string          `json:"stop_sequence"`
+	Usage        *anthropicUsage `json:"usage,omitempty"`
 }
 
 type anthropicStreamDelta struct {
@@ -157,11 +169,23 @@ type anthropicStreamDelta struct {
 }
 
 type anthropicContentBlockInit struct {
-	Type  string          `json:"type"` // "text" | "tool_use" | "thinking"
-	ID    string          `json:"id,omitempty"`
-	Name  string          `json:"name,omitempty"`
-	Input json.RawMessage `json:"input,omitempty"`
-	Text  string          `json:"text,omitempty"`
+	Type      string          `json:"type"` // "text" | "tool_use" | "thinking"
+	ID        string          `json:"id,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	Input     json.RawMessage `json:"input,omitempty"`
+	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	Signature string          `json:"signature,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+func (b *anthropicContentBlockInit) UnmarshalJSON(raw []byte) error {
+	type plain anthropicContentBlockInit
+	if err := json.Unmarshal(raw, (*plain)(b)); err != nil {
+		return err
+	}
+	b.Raw = append(json.RawMessage(nil), raw...)
+	return nil
 }
 
 type anthropicUsage struct {
@@ -220,6 +244,13 @@ func convertMessagesToAnthropic(msgs []openAIMessage) (system string, out []anth
 				Content: []anthropicContentBlock{block},
 			})
 		case "assistant":
+			if len(m.AnthropicContent) > 0 {
+				if err := validateAnthropicNativeContent(m.AnthropicContent); err != nil {
+					return "", nil, err
+				}
+				out = append(out, anthropicMessage{Role: "assistant", NativeContent: m.AnthropicContent})
+				continue
+			}
 			var blocks []anthropicContentBlock
 			if s, ok := decodeAsString(m.Content); ok && strings.TrimSpace(s) != "" {
 				blocks = append(blocks, anthropicContentBlock{
@@ -368,7 +399,7 @@ func decodeAsString(raw json.RawMessage) (string, bool) {
 // sequential tool_result blocks) must be folded into a single user message
 // with all the tool_results as siblings.
 func appendCoalesced(out []anthropicMessage, msg anthropicMessage) []anthropicMessage {
-	if n := len(out); n > 0 && out[n-1].Role == msg.Role {
+	if n := len(out); n > 0 && out[n-1].Role == msg.Role && len(out[n-1].NativeContent) == 0 && len(msg.NativeContent) == 0 {
 		out[n-1].Content = append(out[n-1].Content, msg.Content...)
 		return out
 	}
@@ -463,10 +494,15 @@ func streamAnthropic(
 		Tools:     convertToolsToAnthropic(tools),
 		Stream:    true,
 	}
-	if opts.ThinkingBudget > 0 {
+	// A per-invocation output cap may be lower than the configured thinking
+	// budget. Anthropic requires at least 1024 thinking tokens, strictly less
+	// than max_tokens; preserve the caller's output cap and disable thinking
+	// when no valid budget fits.
+	thinkingBudget := min(opts.ThinkingBudget, maxTokens-1)
+	if thinkingBudget >= 1024 {
 		req.Thinking = &anthropicThinking{
 			Type:         "enabled",
-			BudgetTokens: opts.ThinkingBudget,
+			BudgetTokens: thinkingBudget,
 		}
 	}
 	if os.Getenv("DEBUG") == "1" {
@@ -526,10 +562,14 @@ func streamAnthropic(
 	// their deltas straight through onDelta; tool_use blocks buffer the
 	// partial_json until the block closes.
 	type contentAcc struct {
-		kind string // "text" | "tool_use" | "thinking"
-		id   string
-		name string
-		args strings.Builder
+		kind      string // "text" | "tool_use" | "thinking"
+		id        string
+		name      string
+		args      strings.Builder
+		text      strings.Builder
+		thinking  strings.Builder
+		signature strings.Builder
+		raw       map[string]json.RawMessage
 	}
 	blocks := map[int]*contentAcc{}
 
@@ -573,6 +613,10 @@ func streamAnthropic(
 				acc.kind = ev.Content.Type
 				acc.id = ev.Content.ID
 				acc.name = ev.Content.Name
+				acc.text.WriteString(ev.Content.Text)
+				acc.thinking.WriteString(ev.Content.Thinking)
+				acc.signature.WriteString(ev.Content.Signature)
+				_ = json.Unmarshal(ev.Content.Raw, &acc.raw)
 				// Intentionally do NOT seed acc.args from ev.Content.Input:
 				// Anthropic always emits `{}` as a placeholder on tool_use
 				// content_block_start events and delivers the real arguments
@@ -580,12 +624,21 @@ func streamAnthropic(
 				// `{}` would produce `{}{"real":"args"}` once appended.
 			}
 			blocks[ev.Index] = acc
+			if acc.text.Len() > 0 || acc.thinking.Len() > 0 {
+				if err := onDelta(acc.text.String(), acc.thinking.String(), false); err != nil {
+					result.SSERaw = sseBuf.Bytes()
+					return result, err
+				}
+			}
 		case "content_block_delta":
 			if ev.Delta == nil {
 				continue
 			}
 			switch ev.Delta.Type {
 			case "text_delta":
+				if acc := blocks[ev.Index]; acc != nil {
+					acc.text.WriteString(ev.Delta.Text)
+				}
 				if ev.Delta.Text != "" {
 					if err := onDelta(ev.Delta.Text, "", false); err != nil {
 						result.SSERaw = sseBuf.Bytes()
@@ -593,6 +646,9 @@ func streamAnthropic(
 					}
 				}
 			case "thinking_delta":
+				if acc := blocks[ev.Index]; acc != nil {
+					acc.thinking.WriteString(ev.Delta.Thinking)
+				}
 				if ev.Delta.Thinking != "" {
 					if err := onDelta("", ev.Delta.Thinking, false); err != nil {
 						result.SSERaw = sseBuf.Bytes()
@@ -604,8 +660,9 @@ func streamAnthropic(
 					acc.args.WriteString(ev.Delta.PartialJSON)
 				}
 			case "signature_delta":
-				// Extended-thinking signature for the preceding thinking
-				// block. We don't surface it to the user; record-only.
+				if acc := blocks[ev.Index]; acc != nil {
+					acc.signature.WriteString(ev.Delta.Signature)
+				}
 			}
 		case "content_block_stop":
 			// Nothing to do; accumulators stay alive until flushToolCalls.
@@ -649,9 +706,38 @@ func streamAnthropic(
 			indices[j-1], indices[j] = indices[j], indices[j-1]
 		}
 	}
+	var nativeBlocks []json.RawMessage
 	for _, idx := range indices {
 		acc := blocks[idx]
-		if acc == nil || acc.kind != "tool_use" || acc.name == "" {
+		if acc == nil {
+			continue
+		}
+		if acc.raw == nil {
+			acc.raw = make(map[string]json.RawMessage)
+		}
+		setString := func(key, value string) { acc.raw[key], _ = json.Marshal(value) }
+		switch acc.kind {
+		case "text":
+			setString("text", acc.text.String())
+		case "thinking":
+			setString("thinking", acc.thinking.String())
+			setString("signature", acc.signature.String())
+		case "redacted_thinking":
+		case "tool_use":
+			args := strings.TrimSpace(acc.args.String())
+			if args == "" {
+				args = "{}"
+			}
+			acc.raw["input"] = json.RawMessage(args)
+		default:
+			return result, fmt.Errorf("unsupported Anthropic content block %q", acc.kind)
+		}
+		encoded, err := json.Marshal(acc.raw)
+		if err != nil {
+			return result, fmt.Errorf("invalid Anthropic content block: %w", err)
+		}
+		nativeBlocks = append(nativeBlocks, encoded)
+		if acc.kind != "tool_use" {
 			continue
 		}
 		args := strings.TrimSpace(acc.args.String())
@@ -663,6 +749,16 @@ func streamAnthropic(
 			Name:      acc.name,
 			Arguments: args,
 		})
+	}
+	if err := validateProviderToolCalls(result.ToolCalls); err != nil {
+		result.SSERaw = sseBuf.Bytes()
+		return result, err
+	}
+	if len(nativeBlocks) > 0 {
+		result.AnthropicContent, _ = json.Marshal(nativeBlocks)
+		if err := validateAnthropicNativeContent(result.AnthropicContent); err != nil {
+			return result, err
+		}
 	}
 
 	// Anthropic occasionally skips message_delta.stop_reason on very short

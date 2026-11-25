@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -25,21 +27,10 @@ func gzipReader(b []byte) (io.ReadCloser, error) {
 	return gzip.NewReader(bytes.NewReader(b))
 }
 
-// Cursor's own hosts, split by the role each plays once we intercept it.
-// api2.cursor.sh carries the agent RPCs we translate to the user's BYOK
-// provider (plus the synthetic model-list responses); the authentication
-// hosts are 404'd so Cursor keeps trusting the injected Pro session. These
-// are the only hosts whose TLS we decrypt — everything else is tunnelled
-// straight through.
-var (
-	cursorAPI2Hosts = map[string]struct{}{
-		"api2.cursor.sh": {},
-	}
-	cursorAuthHosts = map[string]struct{}{
-		"authentication.cursor.sh":      {},
-		"prod.authentication.cursor.sh": {},
-	}
-)
+// Only the API host carries the RPCs translated to the user's BYOK provider.
+// Authentication, marketplace downloads and unrelated applications retain
+// their original end-to-end TLS connections.
+var cursorAPI2Hosts = map[string]struct{}{"api2.cursor.sh": {}}
 
 // normalizeHost lowercases a host and strips any port. Cursor connects with a
 // lowercase hostname on :443, but normalizing keeps the CONNECT-time MITM
@@ -60,11 +51,6 @@ func isCursorAPI2Host(host string) bool {
 	return ok
 }
 
-func isCursorAuthHost(host string) bool {
-	_, ok := cursorAuthHosts[normalizeHost(host)]
-	return ok
-}
-
 // shouldMITMHost reports whether a CONNECT target (host or host:port) is one
 // of Cursor's own hosts we must intercept. Every other host is tunnelled
 // straight through untouched.
@@ -77,7 +63,7 @@ func isCursorAuthHost(host string) bool {
 // Cursor's hosts lets unrelated traffic reach its real upstream and validate
 // the genuine server certificate as usual.
 func shouldMITMHost(host string) bool {
-	return isCursorAPI2Host(host) || isCursorAuthHost(host)
+	return isCursorAPI2Host(host)
 }
 
 type Server struct {
@@ -94,6 +80,10 @@ type Server struct {
 type AgentResolver = agent.AdapterResolver
 
 func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, selectedModel func(string) string) (*Server, error) {
+	return newWithAuthorizer(addr, ca, gw, resolver, selectedModel, authorizeLocalRequest)
+}
+
+func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, selectedModel func(string) string, authorize localAuthorizer) (*Server, error) {
 	tlsCert, err := tls.X509KeyPair(ca.CertPEM(), ca.KeyPEM())
 	if err != nil {
 		return nil, err
@@ -104,59 +94,76 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 	}
 	tlsCert.Leaf = leaf
 
-	goproxy.GoproxyCa = tlsCert
-	tlsCfg := goproxy.TLSConfigFromCA(&tlsCert)
-	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: tlsCfg}
-	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: tlsCfg}
-	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: tlsCfg}
-	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsCfg}
+	signTLS := goproxy.TLSConfigFromCA(&tlsCert)
+	tlsCfg := func(host string, ctx *goproxy.ProxyCtx) (*tls.Config, error) {
+		cfg, err := signTLS(host, ctx)
+		if err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
 
 	serverCtx, cancel := context.WithCancel(context.Background())
+	bidiRoutes := newBidiRouteRegistry()
+	context.AfterFunc(serverCtx, bidiRoutes.close)
 	p := goproxy.NewProxyHttpServer()
-	p.Verbose = os.Getenv("DEBUG") == "1"
+	// CONNECT has a separate environment-derived dialer from Transport.Proxy.
+	// A system proxy pointing back here must never recursively tunnel to itself.
+	p.ConnectDial = nil
+	// goproxy defaults to skipping upstream certificate verification. Native
+	// requests now carry the user's real account credentials, so validate the
+	// upstream certificate using the system roots and requested hostname.
+	p.Tr = &http.Transport{
+		// The OS already routes requests through this server. Consulting proxy
+		// environment variables here can send upstream requests back to us.
+		Proxy:                 nil,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSHandshakeTimeout:   10 * time.Second,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		ExpectContinueTimeout: time.Second,
+	}
+	debug := os.Getenv("DEBUG") == "1"
+	// Keep goproxy's full-URL logging off: native authentication requests may
+	// carry sensitive query parameters. Our diagnostics log host/path only.
+	p.Verbose = false
+	p.AllowHTTP2 = false
+	mitmAction := connectTLSAction(serverCtx, p, tlsCfg)
+	tunnelAction := &goproxy.ConnectAction{Action: goproxy.ConnectAccept}
 	// Only decrypt Cursor's own hosts; tunnel everything else straight to its
 	// real upstream. The system proxy routes the whole machine's HTTPS here,
 	// so intercepting every host would break unrelated apps that pin certs or
 	// don't trust our CA (issue #4). See shouldMITMHost.
 	p.OnRequest().HandleConnectFunc(func(host string, _ *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
 		if shouldMITMHost(host) {
-			return goproxy.MitmConnect, host
+			return mitmAction, host
 		}
-		return goproxy.OkConnect, host
+		return tunnelAction, host
 	})
 
-	// Mimic the working app's "everything secondary is 404" strategy. Cursor
-	// pings dozens of auxiliary RPCs (auth profile, plan info, plugins,
-	// statsig flags, etc.) and any one of them returning real upstream data
-	// can flip the chat picker into "BYOK not allowed for your account" and
-	// hide our injected models. The working app captures show only three
-	// paths return real bodies; everything else gets a 404. Replicate that
-	// exactly by allowlisting just the BYOK-critical paths and rejecting
-	// the rest of api2.cursor.sh + auth host.
-	// Paths we let through to the upstream so Cursor's real chat plumbing
-	// runs (agent in/out streams). Everything else on api2/auth hosts gets
-	// a 404 — matching the working app's captured behaviour byte-for-byte.
-	allowedAPI2Paths := map[string]struct{}{
-		"/aiserver.v1.BidiService/BidiAppend":                                       {}, // agent input stream
-		"/agent.v1.AgentService/RunSSE":                                             {}, // agent output SSE
-		"/aiserver.v1.AiService/WriteGitCommitMessage":                              {},
-		"/aiserver.v1.AiService/StreamBugBotAgenticSSE":                             {},
-		"/aiserver.v1.BackgroundComposerService/AddAsyncFollowupBackgroundComposer": {},
-		"/aiserver.v1.BackgroundComposerService/GetBackgroundComposerStatus":        {},
-		"/aiserver.v1.BackgroundComposerService/AttachBackgroundComposer":           {},
-		"/aiserver.v1.BackgroundComposerService/StreamInteractionUpdatesSSE":        {},
-	}
+	// Intercept only the explicitly implemented BYOK routes. All other native
+	// requests retain their real account, response and entitlement semantics.
 	// Synthetic raw-protobuf responses cloned from the working app captures.
 	// Each entry is a hand-rolled body the gateway can produce on demand
 	// (so it can be parameterised by the user's BYOK adapter list). We send
 	// these with Content-Type: application/proto, no Connect envelope —
 	// mirrors the captured working-app response shape exactly.
 	syntheticAPI2Paths := map[string]struct{}{
+		"/aiserver.v1.AiService/GetDefaultModel":          {},
 		"/aiserver.v1.AiService/AvailableModels":          {},
 		"/aiserver.v1.AiService/GetDefaultModelNudgeData": {},
 	}
 	mockProto := func(req *http.Request, body []byte) *http.Response {
-		if p.Verbose {
+		contentType := "application/proto"
+		if strings.HasPrefix(req.Header.Get("Content-Type"), "application/connect+proto") {
+			contentType = "application/connect+proto"
+			framed := binary.BigEndian.AppendUint32([]byte{0}, uint32(len(body)))
+			framed = append(framed, body...)
+			body = append(framed, 2, 0, 0, 0, 2, '{', '}')
+		}
+		if debug {
 			log.Printf("[MOCK PROTO] 200 %s (%d bytes)", req.URL.Path, len(body))
 		}
 		return &http.Response{
@@ -168,7 +175,7 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 			Body:          io.NopCloser(bytes.NewReader(body)),
 			ContentLength: int64(len(body)),
 			Header: http.Header{
-				"Content-Type":                 {"application/proto"},
+				"Content-Type":                 {contentType},
 				"Access-Control-Allow-Origin":  {"*"},
 				"Access-Control-Allow-Methods": {"*"},
 				"Access-Control-Allow-Headers": {"*"},
@@ -176,31 +183,21 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 			Request: req,
 		}
 	}
-	mock404 := func(req *http.Request) *http.Response {
-		if p.Verbose {
-			log.Printf("[MOCK] 404 Not Found %s", req.URL.Path)
+	p.OnRequest().DoFunc(func(req *http.Request, proxyCtx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		// goproxy invokes filters before rejecting an HTTP/2 preface or a
+		// failed URL reconstruction. PRI * can therefore arrive with URL=nil.
+		// Let its HTTP/2 guard close that connection, before logging/routing
+		// dereferences URL. This also handles clients that ignore ALPN.
+		if req.Method == "PRI" {
+			return req, nil
 		}
-		body := "404 page not found\n"
-		return &http.Response{
-			Status:        "404 Not Found",
-			StatusCode:    http.StatusNotFound,
-			Proto:         req.Proto,
-			ProtoMajor:    req.ProtoMajor,
-			ProtoMinor:    req.ProtoMinor,
-			Body:          io.NopCloser(strings.NewReader(body)),
-			ContentLength: int64(len(body)),
-			Header: http.Header{
-				"Content-Type":           {"text/plain; charset=utf-8"},
-				"X-Content-Type-Options": {"nosniff"},
-			},
-			Request: req,
+		if req.URL == nil {
+			return req, makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"invalid request URL"}`)
 		}
-	}
-	p.OnRequest().DoFunc(func(req *http.Request, _ *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-		if p.Verbose {
-			log.Printf("[REQ] %s %s (CT: %s)", req.Method, req.URL.String(), req.Header.Get("Content-Type"))
+		if debug {
+			log.Printf("[REQ] %s %s%s (CT: %s)", req.Method, req.URL.Host, req.URL.Path, req.Header.Get("Content-Type"))
 		}
-		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" {
+		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" && isCursorAPI2Host(req.URL.Host) && localProxyPath(req.URL.Path) {
 			return req, &http.Response{
 				StatusCode: http.StatusNoContent,
 				Status:     "204 No Content",
@@ -218,62 +215,100 @@ func New(addr string, ca *certs.CA, gw *relay.Gateway, resolver AgentResolver, s
 			}
 		}
 		path := req.URL.Path
-		isAuthHost := isCursorAuthHost(req.URL.Host)
 		isAPI2Host := isCursorAPI2Host(req.URL.Host)
 		if isAPI2Host {
+			if req.Method == http.MethodOptions {
+				return nativePassthroughRequest(req)
+			}
+			if paidLocalPath(path) && (authorize == nil || !authorize(req.Context(), req.Header)) {
+				return req, makeJSONResp(req, http.StatusUnauthorized, `{"code":"unauthenticated","message":"Local inference requires the current Cursor account."}`)
+			}
+			if unsupportedLocalBidiPoll(path) {
+				return req, makeJSONResp(req, http.StatusNotImplemented, `{"code":"unimplemented","message":"Local BYOK polling is not supported; use WebSocket or SSE"}`)
+			}
+			if path == "/aiserver.v1.BidiService/BidiAppend" {
+				return bidiRoutes.append(req)
+			}
+			poll, native := nativeBidiStreams[path]
+			if localBidiStream(path) || native {
+				mode := "local"
+				if native {
+					mode = "native"
+				}
+				forward, response, lease := bidiRoutes.claim(req, mode, poll, serverCtx, proxyCtx.RoundTrip)
+				if response != nil {
+					return forward, response
+				}
+				req = forward
+				proxyCtx.UserData = lease
+				if native {
+					previous := proxyCtx.RoundTripper
+					proxyCtx.RoundTripper = goproxy.RoundTripperFunc(func(request *http.Request, ctx *goproxy.ProxyCtx) (*http.Response, error) {
+						var response *http.Response
+						var err error
+						if previous != nil {
+							response, err = previous.RoundTrip(request, ctx)
+						} else {
+							response, err = p.Tr.RoundTrip(request)
+						}
+						if err != nil {
+							lease.close()
+						}
+						return response, err
+					})
+					return req, nil
+				}
+			}
 			if path == "/agent/v1/run" {
-				return req, handleAgentWebSocket(req, serverCtx, resolver)
+				return req, handleAgentWebSocket(req, serverCtx, resolver, authorize)
 			}
 			if _, ok := syntheticAPI2Paths[path]; ok && gw != nil {
 				if body := gw.SyntheticPath(path); body != nil {
 					return req, mockProto(req, body)
 				}
 			}
-			if path == "/aiserver.v1.BidiService/BidiAppend" {
-				return req, handleBidiAppend(req)
-			}
 			if path == "/agent.v1.AgentService/RunSSE" {
-				return req, handleRunSSE(req, resolver)
+				return req, handleRunSSE(req, serverCtx, resolver)
+			}
+			if path == "/aiserver.v1.InferenceService/RunInferenceSSE" {
+				return req, handleInferenceSSE(req, serverCtx, resolver)
+			}
+			if path == "/aiserver.v1.AiService/NameTab" {
+				return req, handleNativeText(req, resolver, "")
+			}
+			if path == "/aiserver.v1.AiService/WriteGitBranchName" {
+				return req, handleNativeText(req, resolver, selectedModel("commit"))
 			}
 			if path == "/aiserver.v1.AiService/WriteGitCommitMessage" {
 				return req, handleWriteGitCommitMessage(req, resolver, selectedModel("commit"))
 			}
 			if path == "/aiserver.v1.AiService/StreamBugBotAgenticSSE" {
-				return req, handleBugBotRunSSE(req, resolver, selectedModel("review"))
+				return req, handleBugBotRunSSE(req, serverCtx, resolver, selectedModel("review"))
 			}
-			if path == "/aiserver.v1.BackgroundComposerService/AddAsyncFollowupBackgroundComposer" {
-				return req, handleBackgroundComposerAddFollowup(req)
-			}
-			if path == "/aiserver.v1.BackgroundComposerService/GetBackgroundComposerStatus" {
-				return req, handleBackgroundComposerStatus(req)
-			}
-			if path == "/aiserver.v1.BackgroundComposerService/AttachBackgroundComposer" {
-				return req, handleBackgroundComposerAttach(req, resolver)
-			}
-			if path == "/aiserver.v1.BackgroundComposerService/StreamInteractionUpdatesSSE" {
-				return req, handleBackgroundComposerInteractionUpdates(req)
-			}
-			if _, allowed := allowedAPI2Paths[path]; allowed {
-				return req, nil
-			}
-			return req, mock404(req)
-		}
-		if isAuthHost {
-			return req, mock404(req)
+			return nativePassthroughRequest(req)
 		}
 		return req, nil
 	})
 
-	if gw != nil {
-		p.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-			var req *http.Request
-			if ctx != nil {
-				req = ctx.Req
+	p.OnResponse().DoFunc(func(resp *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+		var req *http.Request
+		if ctx != nil {
+			req = ctx.Req
+		}
+		if ctx != nil {
+			if lease, ok := ctx.UserData.(*bidiRouteLease); ok && lease != nil {
+				if resp == nil || resp.Body == nil {
+					lease.close()
+				} else {
+					resp.Body = &bidiLeaseBody{ReadCloser: resp.Body, lease: lease}
+				}
 			}
+		}
+		if gw != nil {
 			gw.MaybeRewriteResponse(req, resp)
-			return resp
-		})
-	}
+		}
+		return resp
+	})
 
 	return &Server{
 		addr:   addr,
@@ -317,35 +352,10 @@ func handleBidiAppend(req *http.Request) *http.Response {
 // and writes Connect SSE frames to the pipe writer. goproxy copies the
 // pipe reader to the client connection so each frame reaches Cursor as
 // soon as it's written (no buffering at our layer).
-func handleRunSSE(req *http.Request, resolver agent.AdapterResolver) *http.Response {
-	body, err := readDecodedBody(req)
-	if err != nil {
-		return makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"read body: `+err.Error()+`"}`)
-	}
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		agent.HandleRunSSE(req.Context(), body, req.Header.Get("Content-Type"), pw, resolver)
-	}()
-	hdr := http.Header{}
-	for k, vs := range agent.RunSSEHeaders {
-		for _, v := range vs {
-			hdr.Add(k, v)
-		}
-	}
-	hdr.Set("Access-Control-Allow-Origin", "*")
-	hdr.Set("Access-Control-Allow-Methods", "*")
-	hdr.Set("Access-Control-Allow-Headers", "*")
-	return &http.Response{
-		Status:     "200 OK",
-		StatusCode: http.StatusOK,
-		Proto:      req.Proto,
-		ProtoMajor: req.ProtoMajor,
-		ProtoMinor: req.ProtoMinor,
-		Body:       pr,
-		Header:     hdr,
-		Request:    req,
-	}
+func handleRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver) *http.Response {
+	return streamAgentResponse(req, serverCtx, agent.RunSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
+		agent.HandleRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver)
+	})
 }
 
 func handleWriteGitCommitMessage(req *http.Request, resolver agent.AdapterResolver, selectedModel string) *http.Response {
@@ -371,32 +381,10 @@ func handleWriteGitCommitMessage(req *http.Request, resolver agent.AdapterResolv
 	}
 }
 
-func handleBugBotRunSSE(req *http.Request, resolver agent.AdapterResolver, selectedModel string) *http.Response {
-	body, err := readDecodedBody(req)
-	if err != nil {
-		return makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"read body: `+err.Error()+`"}`)
-	}
-	pr, pw := io.Pipe()
-	go func() {
-		defer pw.Close()
-		agent.HandleBugBotRunSSE(req.Context(), body, req.Header.Get("Content-Type"), pw, resolver, selectedModel)
-	}()
-	hdr := http.Header{}
-	for k, vs := range agent.BugBotSSEHeaders {
-		for _, v := range vs {
-			hdr.Add(k, v)
-		}
-	}
-	return &http.Response{
-		Status:     "200 OK",
-		StatusCode: http.StatusOK,
-		Proto:      req.Proto,
-		ProtoMajor: req.ProtoMajor,
-		ProtoMinor: req.ProtoMinor,
-		Body:       pr,
-		Header:     hdr,
-		Request:    req,
-	}
+func handleBugBotRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver, selectedModel string) *http.Response {
+	return streamAgentResponse(req, serverCtx, agent.BugBotSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
+		agent.HandleBugBotRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver, selectedModel)
+	})
 }
 
 func handleBackgroundComposerAttach(req *http.Request, resolver agent.AdapterResolver) *http.Response {
@@ -484,9 +472,24 @@ func handleBackgroundComposerStatus(req *http.Request) *http.Response {
 // raw transport here is decoupled from any Connect envelope/compression
 // the inner protobuf might also carry — that's still done by the agent
 // package via decodeUnary.
+const maxLocalRequestBody = 32 << 20
+
 func readDecodedBody(req *http.Request) ([]byte, error) {
+	return readDecodedBodyLimit(req, maxLocalRequestBody)
+}
+
+func readDecodedBodyLimit(req *http.Request, limit int64) ([]byte, error) {
+	if req.Body == nil {
+		return nil, errors.New("missing request body")
+	}
 	defer req.Body.Close()
-	raw, err := io.ReadAll(req.Body)
+	if req.ContentLength > limit {
+		return nil, errors.New("request body too large")
+	}
+	raw, err := io.ReadAll(io.LimitReader(req.Body, limit+1))
+	if int64(len(raw)) > limit {
+		return nil, errors.New("request body too large")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -497,7 +500,10 @@ func readDecodedBody(req *http.Request) ([]byte, error) {
 			return nil, gerr
 		}
 		defer zr.Close()
-		out, rerr := io.ReadAll(zr)
+		out, rerr := io.ReadAll(io.LimitReader(zr, limit+1))
+		if int64(len(out)) > limit {
+			return nil, errors.New("decoded request body too large")
+		}
 		if rerr != nil {
 			return nil, rerr
 		}

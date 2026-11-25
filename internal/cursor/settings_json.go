@@ -9,7 +9,7 @@ import (
 // Cursor settings use JSON with comments and trailing commas (JSONC). Strip
 // only those extensions, leaving string contents and byte offsets intact so
 // the standard decoder can still reject malformed or truncated documents.
-func decodeSettings(data []byte) (map[string]any, error) {
+func stripSettingsComments(data []byte) ([]byte, error) {
 	b := bytes.Clone(data)
 	if bytes.HasPrefix(b, []byte{0xef, 0xbb, 0xbf}) {
 		copy(b[:3], "   ")
@@ -60,7 +60,15 @@ func decodeSettings(data []byte) (map[string]any, error) {
 			}
 		}
 	}
-	inString, escaped = false, false
+	return b, nil
+}
+
+func normalizeSettingsJSON(data []byte) ([]byte, error) {
+	b, err := stripSettingsComments(data)
+	if err != nil {
+		return nil, err
+	}
+	inString, escaped := false, false
 	for i := 0; i < len(b); i++ {
 		if inString {
 			if escaped {
@@ -92,6 +100,14 @@ func decodeSettings(data []byte) (map[string]any, error) {
 				b[i] = ' '
 			}
 		}
+	}
+	return b, nil
+}
+
+func decodeSettings(data []byte) (map[string]any, error) {
+	b, err := normalizeSettingsJSON(data)
+	if err != nil {
+		return nil, err
 	}
 	var settings map[string]any
 	if err := json.Unmarshal(b, &settings); err != nil {

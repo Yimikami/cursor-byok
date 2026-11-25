@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve Anthropic signed/redacted thinking through native tool-result replay, reconcile thinking with output caps, and keep excess concurrent invocations from canceling active work.
+- Publish complete preference backups atomically and avoid replaying restored settings when only sidecar deletion remains pending; resolve macOS service names through native UUID lookups.
+- Require the current local Cursor account before paid BYOK requests; bound request bodies and gzip expansion without changing native account passthrough.
+- Preserve WebSocket upgrade read-ahead bytes, close upgraded tunnels, drain half-closed inference runs, and keep legacy SSE retries attached to their own conversation.
+- Ignore inherited CONNECT proxy settings to prevent self-proxy loops; preserve Connect framing and trailers in rewritten model responses.
+- Support Cursor 3.32.4 local-loop inference over WebSocket and SSE, including native tool schemas, streamed tool calls, cancellation and provider errors.
+- Preserve real Cursor sign-in and forward native account, update and extension requests with verified TLS; remove synthetic account creation and blanket auxiliary 404 responses.
+- Preserve JSONC comments and unrelated edits, scope legacy tool results to their owning run, and stop allocating buffers for late shell events.
+- Generate native chat titles and Git branch names through the selected BYOK provider; reject empty or truncated commit/review output.
+- Keep the selected BYOK model when Cursor refreshes defaults, and supply the per-mode tool metadata required by current Plan/Ask/Debug/Multitask clients.
+- Restore Cursor's previous model preferences on Stop, failed startup, and crash recovery. Validate account backups and restore account keys transactionally.
+- Prevent an HTTP/2 connection preface from crashing the proxy during current Cursor startup; retain HTTP/1.1 WebSocket compatibility and route HTTP/2-only native streams through the same handlers, preserving gRPC trailers.
 - Support Cursor's `/agent/v1/run` WebSocket v1 transport alongside the legacy SSE transport; handle the handshake, run lifecycle, ordered agent messages, cancellation, and terminal errors locally (#12).
 - Verify the actual local CA certificate instead of accepting any certificate with the same name. Preserve damaged/incomplete CA files for recovery and install macOS trust in the current user's trust domain.
 - Check service prerequisites before changing the system proxy, roll back failed setup, retain a reachable listener when restoration fails, and recover saved settings after an interrupted session.

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	_ "cursor-byok/internal/protocodec/gen/aiserver/v1"
 )
@@ -18,15 +19,15 @@ import (
 // AdapterInfo carries the bits of a configured BYOK adapter that the rewriter
 // needs to forge synthetic responses.
 type AdapterInfo struct {
-	DisplayName     string
-	Type            string
-	ModelID         string
-	BaseURL         string
-	APIKey          string
+	DisplayName             string
+	Type                    string
+	ModelID                 string
+	BaseURL                 string
+	APIKey                  string
 	SupportedThinkingLevels []string
-	ServiceTier     string
-	MaxOutputTokens int
-	ThinkingBudget  int
+	ServiceTier             string
+	MaxOutputTokens         int
+	ThinkingBudget          int
 }
 
 // StableID returns a 16-char hex identifier derived from the provider model
@@ -47,6 +48,7 @@ type rewriter func(body []byte, adapters []AdapterInfo) ([]byte, error)
 
 var rewrites = map[string]rewriter{
 	"/aiserver.v1.AiService/AvailableModels": rewriteAvailableModels,
+	"/aiserver.v1.AiService/GetDefaultModel": rewriteGetDefaultModel,
 }
 
 // SyntheticPath returns the hand-rolled response bytes (raw protobuf, no
@@ -63,6 +65,8 @@ func (g *Gateway) SyntheticPath(path string) []byte {
 		return nil
 	}
 	switch path {
+	case "/aiserver.v1.AiService/GetDefaultModel":
+		return buildGetDefaultModelResponse(adapters)
 	case "/aiserver.v1.AiService/GetDefaultModelNudgeData":
 		return buildGetDefaultModelNudgeDataResponse(adapters)
 	case "/aiserver.v1.AiService/AvailableModels":
@@ -74,7 +78,7 @@ func (g *Gateway) SyntheticPath(path string) []byte {
 // MaybeRewriteResponse swaps the body of any path we know how to forge. It
 // transparently handles 5-byte Connect framing and HTTP-level gzip.
 func (g *Gateway) MaybeRewriteResponse(req *http.Request, resp *http.Response) bool {
-	if req == nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	if req == nil || req.URL == nil || resp == nil || resp.Body == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return false
 	}
 	fn, ok := rewrites[req.URL.Path]
@@ -86,13 +90,24 @@ func (g *Gateway) MaybeRewriteResponse(req *http.Request, resp *http.Response) b
 		return false
 	}
 
-	body, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
-	if err != nil {
+	originalBody := resp.Body
+	body, err := io.ReadAll(io.LimitReader(originalBody, (32<<20)+1))
+	if err != nil || len(body) > 32<<20 {
+		// Rewriting is optional; retain the original stream when buffering fails.
+		resp.Body = &prefixResponseBody{Reader: io.MultiReader(bytes.NewReader(body), originalBody), Closer: originalBody}
 		return false
 	}
+	_ = originalBody.Close()
 
-	newBody, _, err := tryRewrite(body, adapters, fn)
+	decoded := body
+	if strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		decoded, err = gunzipBytes(body)
+		if err != nil {
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			return false
+		}
+	}
+	newBody, framed, err := tryRewrite(decoded, adapters, fn)
 	if err != nil {
 		resp.Body = io.NopCloser(bytes.NewReader(body))
 		return false
@@ -101,41 +116,65 @@ func (g *Gateway) MaybeRewriteResponse(req *http.Request, resp *http.Response) b
 	resp.Body = io.NopCloser(bytes.NewReader(newBody))
 	resp.ContentLength = int64(len(newBody))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
+	if framed {
+		if !strings.Contains(resp.Header.Get("Content-Type"), "grpc") {
+			resp.Header.Set("Content-Type", "application/connect+proto")
+		}
+	} else {
+		resp.Header.Set("Content-Type", "application/proto")
+	}
 	resp.Header.Del("Content-Encoding")
 	return true
 }
 
-// tryRewrite handles the wire-format dance: it tries the body as a raw
-// protobuf payload first, then as a 5-byte Connect envelope (with optional
-// per-frame gzip), and re-emits the result in the same shape.
+type prefixResponseBody struct {
+	io.Reader
+	io.Closer
+}
+
+// tryRewrite detects framing before calling a body-independent synthetic
+// rewriter. Low flag bytes cannot begin a valid protobuf field tag. Preserve
+// every data envelope and the original end/trailer envelope in sequence.
 func tryRewrite(body []byte, adapters []AdapterInfo, fn rewriter) (newBody []byte, framed bool, err error) {
-	// Raw protobuf path.
-	if out, rerr := fn(body, adapters); rerr == nil {
-		return out, false, nil
+	if len(body) == 0 || body[0] > 3 {
+		out, err := fn(body, adapters)
+		return out, false, err
 	}
-	// Connect envelope path.
-	if len(body) >= 5 {
-		flags := body[0]
-		length := int(binary.BigEndian.Uint32(body[1:5]))
-		if length >= 0 && len(body) == 5+length {
-			payload := body[5:]
-			if flags&0x01 != 0 {
-				if up, gerr := gunzipBytes(payload); gerr == nil {
-					payload = up
-				}
-			}
-			out, rerr := fn(payload, adapters)
-			if rerr != nil {
-				return nil, true, rerr
-			}
-			env := make([]byte, 5+len(out))
-			env[0] = 0
-			binary.BigEndian.PutUint32(env[1:5], uint32(len(out)))
-			copy(env[5:], out)
-			return env, true, nil
+	var result []byte
+	for len(body) > 0 {
+		if len(body) < 5 || body[0] > 3 {
+			return nil, true, errors.New("invalid Connect envelope")
 		}
+		flags := body[0]
+		length := uint64(binary.BigEndian.Uint32(body[1:5]))
+		if length > uint64(len(body)-5) {
+			return nil, true, errors.New("truncated Connect envelope")
+		}
+		frame := body[:5+int(length)]
+		body = body[len(frame):]
+		if flags&2 != 0 {
+			if len(body) != 0 {
+				return nil, true, errors.New("data after Connect end envelope")
+			}
+			result = append(result, frame...)
+			continue
+		}
+		payload := frame[5:]
+		if flags&1 != 0 {
+			payload, err = gunzipBytes(payload)
+			if err != nil {
+				return nil, true, err
+			}
+		}
+		out, err := fn(payload, adapters)
+		if err != nil {
+			return nil, true, err
+		}
+		result = append(result, 0)
+		result = binary.BigEndian.AppendUint32(result, uint32(len(out)))
+		result = append(result, out...)
 	}
-	return nil, false, errors.New("body did not parse in raw or framed protobuf form")
+	return result, true, nil
 }
 
 // ---------------- Per-endpoint rewriters ----------------
@@ -150,9 +189,10 @@ func rewriteAvailableModels(body []byte, adapters []AdapterInfo) ([]byte, error)
 }
 
 func rewriteGetDefaultModel(body []byte, adapters []AdapterInfo) ([]byte, error) {
-	// Append-mode: don't override Cursor's default. Picker uses whatever
-	// Cursor said and BYOK simply appears as an extra picker entry.
-	return body, nil
+	if len(adapters) == 0 {
+		return body, nil
+	}
+	return buildGetDefaultModelResponse(adapters), nil
 }
 
 func rewriteGetDefaultModelNudge(body []byte, adapters []AdapterInfo) ([]byte, error) {
@@ -175,7 +215,11 @@ func gunzipBytes(b []byte) ([]byte, error) {
 		return nil, err
 	}
 	defer r.Close()
-	return io.ReadAll(r)
+	out, err := io.ReadAll(io.LimitReader(r, (32<<20)+1))
+	if len(out) > 32<<20 {
+		return nil, errors.New("expanded response exceeds limit")
+	}
+	return out, err
 }
 
 // AvailableModelsPath kept for backwards compatibility with anything that

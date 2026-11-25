@@ -102,18 +102,22 @@ var proxyTestCA struct {
 }
 
 func testProxy(t *testing.T, provider string) (*Server, *http.Client) {
+	return testProxyWithAuthorizer(t, provider, func(context.Context, http.Header) bool { return true })
+}
+
+func testProxyWithAuthorizer(t *testing.T, provider string, authorize localAuthorizer) (*Server, *http.Client) {
 	t.Helper()
 	proxyTestCA.Do(func() { proxyTestCA.ca, proxyTestCA.err = certs.LoadOrCreate(t.TempDir()) })
 	ca, err := proxyTestCA.ca, proxyTestCA.err
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New("127.0.0.1:0", ca, nil, func() []agent.AdapterTarget {
+	s, err := newWithAuthorizer("127.0.0.1:0", ca, nil, func() []agent.AdapterTarget {
 		if provider == "" {
 			return nil
 		}
 		return []agent.AdapterTarget{{ProviderType: "openai", BaseURL: provider, Model: "test-model", APIKey: "test-only"}}
-	}, func(string) string { return "" })
+	}, func(string) string { return "" }, authorize)
 	if err != nil {
 		t.Fatal(err)
 	}
