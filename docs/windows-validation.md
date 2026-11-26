@@ -2,9 +2,9 @@
 
 For the later genuine-account Cursor 3.32.4 desktop checks and the historical
 Plan failure, see [the follow-up report](windows-native-desktop-followup.md).
-The shared CreatePlan wrapper fix subsequently passed a real macOS retry; the
-final native picker and corrected CreatePlan still need Windows desktop retesting.
-See [the macOS results](macos-native-20261126.md).
+The shared CreatePlan wrapper fix and native picker subsequently passed Windows
+Cursor 3.32.4 acceptance at `a2a8c5b`; see [the later Windows results](windows-native-20261126.md).
+The historical failures below are retained to explain the fixes, not as current status.
 
 Updated: 2026-11-26. Live UI checks used Windows Cursor 3.31.15; the installation
 later updated to 3.32.4 before the final pure-consumer checks. Initial repository baseline
@@ -139,7 +139,11 @@ production user projects. No external MCP account or service was changed.
 See [native-feature-inventory.md](native-feature-inventory.md) for the bounded
 feature inventory, installed-artifact evidence and remaining unsupported RPCs.
 
-## Acceptance still required
+## Historical acceptance checklist
+
+The seven requested Windows controls, including native picker and CreatePlan/Build,
+subsequently passed at `a2a8c5b`: [acceptance report](windows-native-20261126.md).
+The checklist below describes what was outstanding when this earlier report was written.
 
 After normal Cursor sign-in and a working desktop automation connection, repeat
 the local MCP tool/resource and explicit skill command, then Ask, Plan/Create and

@@ -142,10 +142,12 @@ and protocol while preserving consumed input sequence and conversation identity.
 Concurrent owners and protocol changes are rejected. This transport reopening
 does not advertise full inference session resumption or output replay.
 
-Agent Review (`StreamBugBotAgentic`, its SSE variant and its poll variant) stays
-on Cursor's native service. Review inputs and tool results follow that native
-stream; they do not invoke a configured BYOK provider. Fix All Issues is a
-normal chat prompt, so its subsequent Agent/Inference run remains BYOK.
+Agent Review defaults to local BYOK over `StreamBugBotAgenticSSE`, using the
+selected review model. The dashboard can explicitly select Cursor Bugbot; then
+the direct, SSE and poll endpoints and matching BidiAppend inputs remain native.
+That option uses Cursor account usage and limits. BYOK direct/poll requests fail
+explicitly instead of silently billing Cursor. Fix All Issues is a normal chat
+prompt, so its subsequent Agent/Inference run remains BYOK.
 
 The shared BidiAppend endpoint also carries native Cursor requests. A
 per-proxy registry separates local streams from the native chat, speech,
