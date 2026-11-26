@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep a deleted explicit review selection unavailable until the user chooses a replacement, and distinguish same-name review accounts in the menu.
+- Reserve Bidi stream capacity from unclaimed input and explicitly allow requested renderer headers during local preflight.
+
 - Keep native voice/review Bidi input independent of local account decryption, while retaining account authorization before BYOK inference and late local input.
 - Keep active native review polls on their original destination when the review setting changes, and distinguish review adapters with identical provider model names using persistent adapter identities.
 

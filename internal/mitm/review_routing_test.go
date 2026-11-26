@@ -140,16 +140,33 @@ func TestNativeReviewPollKeepsRouteAfterSettingChange(t *testing.T) {
 	calls := 0
 	p.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		ctx.RoundTripper = goproxy.RoundTripperFunc(func(r *http.Request, _ *goproxy.ProxyCtx) (*http.Response, error) {
+			if r.Method == http.MethodOptions {
+				return &http.Response{StatusCode: 204, Header: http.Header{"Access-Control-Allow-Origin": {cursorRendererOrigin}, "Access-Control-Allow-Methods": {"POST"}, "Access-Control-Allow-Headers": {"authorization,content-type"}}, Body: http.NoBody, Request: r}, nil
+			}
+			if r.Header.Get("Origin") != cursorRendererOrigin {
+				t.Error("renderer Origin was not preserved")
+			}
 			calls++
-			return &http.Response{StatusCode: 200, Header: http.Header{"Access-Control-Allow-Origin": {"native-origin"}}, Body: io.NopCloser(bytes.NewBufferString("native-poll")), Request: r}, nil
+			return &http.Response{StatusCode: 200, Header: http.Header{"Access-Control-Allow-Origin": {cursorRendererOrigin}}, Body: io.NopCloser(bytes.NewBufferString("native-poll")), Request: r}, nil
 		})
 		return req, nil
 	})
 	path := "/aiserver.v1.AiService/StreamBugBotAgenticPoll"
 	for i := 0; i < 2; i++ {
+		preflight := httptest.NewRequest(http.MethodOptions, "https://api2.cursor.sh"+path, nil)
+		preflight.Header.Set("Origin", cursorRendererOrigin)
+		preflight.Header.Set("Access-Control-Request-Method", "POST")
+		preflight.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
+		preflightResult := httptest.NewRecorder()
+		p.ServeHTTP(preflightResult, preflight)
+		if preflightResult.Code != 204 || preflightResult.Header().Get("Access-Control-Allow-Origin") != cursorRendererOrigin || preflightResult.Header().Get("Access-Control-Allow-Headers") != "authorization,content-type" {
+			t.Fatalf("preflight %d failed: %d", i, preflightResult.Code)
+		}
 		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, routeStreamRequest("active-review", path, true))
-		if rec.Code != 200 || rec.Body.String() != "native-poll" || rec.Header().Get("Access-Control-Allow-Origin") != "native-origin" {
+		req := routeStreamRequest("active-review", path, true)
+		req.Header.Set("Origin", cursorRendererOrigin)
+		p.ServeHTTP(rec, req)
+		if rec.Code != 200 || rec.Body.String() != "native-poll" || rec.Header().Get("Access-Control-Allow-Origin") != cursorRendererOrigin {
 			t.Fatalf("poll %d: %d %s", i, rec.Code, rec.Body.String())
 		}
 		native.Store(false)

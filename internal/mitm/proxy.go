@@ -233,7 +233,9 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 				Header: http.Header{
 					"Access-Control-Allow-Origin":  {"*"},
 					"Access-Control-Allow-Methods": {"GET,POST,PUT,PATCH,DELETE,OPTIONS"},
-					"Access-Control-Allow-Headers": {"*"},
+					// Authorization is not covered by the CORS wildcard. Echo the
+					// requested headers only after the native-origin guard above.
+					"Access-Control-Allow-Headers": {req.Header.Get("Access-Control-Request-Headers")},
 					"Access-Control-Max-Age":       {"86400"},
 				},
 				Body:    io.NopCloser(strings.NewReader("")),
