@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Publish configuration changes as complete private snapshots and serialize readers/writers; prevent a delayed adapter probe from overwriting newer settings.
 - Restore the native model selector for configured BYOK adapters on macOS and Windows using Cursor's own-key mode and named-model view, with exact preference restoration and protection for disabled saved native keys.
 - Respect native schema wrappers, tuple/pattern constraints and repaired Anthropic tool history when normalizing provider arguments; fix real CreatePlan todo-array failures.
+- Keep collection arguments unchanged when numeric conversion would lose precision, and recognize macOS's interaction-required Keychain status during explicit Start.
 - Require the exact macOS CA SSL trust record before reporting readiness, and remove only trust domains containing that certificate.
 - Keep OpenAI alternative choices separate so text, reasoning, tool calls and finish markers from another choice cannot corrupt the selected response.
 
