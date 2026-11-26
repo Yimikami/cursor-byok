@@ -185,13 +185,14 @@ func TestBidiNativeCredentialMismatchAndReplayFailures(t *testing.T) {
 
 func TestBidiRegistryStopsAndBoundsPendingRequests(t *testing.T) {
 	routes := newBidiRouteRegistry()
-	routes.queuedBytes = bidiRouteLimit
+	routes.entries["fixture"] = &bidiRoute{touched: time.Now(), pending: map[int64]queuedBidiRequest{0: {body: make([]byte, bidiStagingLimit)}}}
+	routes.queuedBytes = bidiStagingLimit
 	_, resp := routes.append(routeAppendRequest("full", 0, []byte{10, 1, 'x'}, false))
 	if resp == nil || resp.StatusCode != 429 {
 		t.Fatal("queue limit not enforced")
 	}
 	closeRouteResponse(resp)
-	routes.queuedBytes = 0
+	routes.dropEntryLocked("fixture")
 	_, resp = routes.append(routeAppendRequest("queued", 0, []byte{10, 1, 'x'}, false))
 	closeRouteResponse(resp)
 	routes.close()
