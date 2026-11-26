@@ -1,5 +1,7 @@
 # macOS native compatibility investigation — 2026-11-26
 
+Later acceptance supersedes the historical pending statuses below: [Windows native acceptance](windows-native-20261126.md) and [native services / voice follow-up](native-services-20261126.md). Commit generation and Agent Review now stay native; older BYOK-route results below describe the earlier implementation.
+
 ## Static evidence
 
 Scope: inert inspection of the installed official Cursor 3.32.4 application,

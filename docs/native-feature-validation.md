@@ -1,5 +1,7 @@
 # Native Cursor validation
 
+Later acceptance supersedes the historical pending statuses below: [Windows native acceptance](windows-native-20261126.md) and [native services / voice follow-up](native-services-20261126.md). Commit generation and Agent Review now stay native; older BYOK-route results below describe the earlier implementation.
+
 Tested on macOS with the official Cursor 3.32.4 ARM64 package on 2026-11-25,
 using a disposable Git workspace and the user-configured Cortex `letum` model.
 No provider keys, account databases or captured private prompts belong in this
