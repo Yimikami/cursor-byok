@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep Agent Review and commit messages on Cursor's native services, including review SSE/poll input routing. Fix All Issues continues through BYOK chat.
+
 - Publish configuration changes as complete private snapshots and serialize readers/writers; prevent a delayed adapter probe from overwriting newer settings.
 - Restore the native model selector for configured BYOK adapters on macOS and Windows using Cursor's own-key mode and named-model view, with exact preference restoration and protection for disabled saved native keys.
 - Respect native schema wrappers, tuple/pattern constraints and repaired Anthropic tool history when normalizing provider arguments; fix real CreatePlan todo-array failures.
@@ -30,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Support Cursor 3.32.4 local-loop inference over WebSocket and SSE, including native tool schemas, streamed tool calls, cancellation and provider errors.
 - Preserve real Cursor sign-in and forward native account, update and extension requests with verified TLS; remove synthetic account creation and blanket auxiliary 404 responses.
 - Preserve JSONC comments and unrelated edits, scope legacy tool results to their owning run, and stop allocating buffers for late shell events.
-- Generate native chat titles and Git branch names through the selected BYOK provider; reject empty or truncated commit/review output.
+- Generate native chat titles and Git branch names through the selected BYOK provider; reject empty or truncated generated names.
 - Keep the selected BYOK model when Cursor refreshes defaults, and supply the per-mode tool metadata required by current Plan/Ask/Debug/Multitask clients.
 - Restore Cursor's previous model preferences on Stop, failed startup, and crash recovery. Validate account backups and restore account keys transactionally.
 - Prevent an HTTP/2 connection preface from crashing the proxy during current Cursor startup; retain HTTP/1.1 WebSocket compatibility and route HTTP/2-only native streams through the same handlers, preserving gRPC trailers.

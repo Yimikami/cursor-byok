@@ -28,7 +28,6 @@ func TestNativeTextRoutesThroughTLSProxy(t *testing.T) {
 	}{
 		{"NameTab", &aiserverv1.NameTabRequest{Messages: []*aiserverv1.ConversationMessage{{Text: "Fix Cursor"}}}},
 		{"WriteGitBranchName", &aiserverv1.WriteGitBranchNameRequest{Diffs: "+change"}},
-		{"WriteGitCommitMessage", &aiserverv1.WriteGitCommitMessageRequest{Diffs: []string{"+change"}}},
 	} {
 		t.Run(tc.method, func(t *testing.T) {
 			raw, err := proto.Marshal(tc.input)
@@ -56,7 +55,7 @@ func TestNativeTextRoutesThroughTLSProxy(t *testing.T) {
 			if err != nil || response.StatusCode != http.StatusOK {
 				t.Fatalf("status=%d body=%s err=%v", response.StatusCode, body, err)
 			}
-			// All three retained response schemas use field 1 for the text.
+			// Both retained response schemas use field 1 for the text.
 			if got := string(wsField(t, body, 1)); got != "fix/repair-cursor" {
 				t.Fatalf("response field 1 = %q", got)
 			}

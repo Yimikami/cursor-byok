@@ -16,7 +16,6 @@ import (
 	"time"
 
 	agentv1 "cursor-byok/internal/protocodec/gen/agent/v1"
-	aiserv1 "cursor-byok/internal/protocodec/gen/aiserver/v1"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 )
@@ -150,66 +149,39 @@ func TestInferenceSSEBuffersAndOrdersAppendBeforeAttach(t *testing.T) {
 	}
 }
 
-func TestLegacySSESelectsItsOwnBidiProtocol(t *testing.T) {
-	for _, service := range []string{"agent", "bugbot"} {
-		t.Run(service, func(t *testing.T) {
-			answer := "legacy reply"
-			if service == "bugbot" {
-				answer = "[]"
+func TestLegacyAgentSSESelectsItsOwnBidiProtocol(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"legacy reply\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer provider.Close()
+	_, client := testProxy(t, provider.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	owner := newSSETestOwner("legacy-agent-sse")
+	sseAppend(t, ctx, client, owner, 0, wsRunMessage(t, "legacy prompt"), true)
+	resp := ssePost(t, ctx, client, "/agent.v1.AgentService/RunSSE", wsBytes(1, []byte(owner)))
+	defer resp.Body.Close()
+	found := false
+	for {
+		b, end := sseFrame(t, resp.Body)
+		if end {
+			if bytes.Contains(b, []byte("error")) {
+				t.Fatalf("stream error: %s", b)
 			}
-			provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(io.Discard, r.Body)
-				w.Header().Set("Content-Type", "text/event-stream")
-				fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\ndata: [DONE]\n\n", answer)
-			}))
-			defer provider.Close()
-			_, client := testProxy(t, provider.URL)
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			defer cancel()
-			owner := newSSETestOwner("legacy-sse-" + service)
-			payload, path := wsRunMessage(t, "legacy prompt"), "/agent.v1.AgentService/RunSSE"
-			if service == "bugbot" {
-				var err error
-				payload, err = proto.Marshal(&aiserv1.StreamBugBotAgenticClientMessage{Message: &aiserv1.StreamBugBotAgenticClientMessage_Start{Start: &aiserv1.StreamBugBotRequest{UserInstructions: proto.String("review test")}}})
-				if err != nil {
-					t.Fatal(err)
-				}
-				path = "/aiserver.v1.AiService/StreamBugBotAgenticSSE"
-			}
-			sseAppend(t, ctx, client, owner, 0, payload, true)
-			resp := ssePost(t, ctx, client, path, wsBytes(1, []byte(owner)))
-			defer resp.Body.Close()
-			found := false
-			for {
-				b, end := sseFrame(t, resp.Body)
-				if end {
-					if bytes.Contains(b, []byte("error")) {
-						t.Fatalf("stream error: %s", b)
-					}
-					break
-				}
-				if service == "agent" {
-					var m agentv1.AgentServerMessage
-					if err := proto.Unmarshal(b, &m); err != nil {
-						t.Fatal(err)
-					}
-					if m.GetInteractionUpdate().GetTextDelta().GetText() == answer {
-						found = true
-					}
-				} else {
-					var m aiserv1.StreamBugBotAgenticServerMessage
-					if err := proto.Unmarshal(b, &m); err != nil {
-						t.Fatal(err)
-					}
-					if m.GetBugbotResponse().GetSummary() == "No issues found" {
-						found = true
-					}
-				}
-			}
-			if !found {
-				t.Fatal("legacy payload decoded as wrong protocol")
-			}
-		})
+			break
+		}
+		var m agentv1.AgentServerMessage
+		if err := proto.Unmarshal(b, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.GetInteractionUpdate().GetTextDelta().GetText() == "legacy reply" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("legacy Agent payload decoded as wrong protocol")
 	}
 }
 

@@ -18,10 +18,8 @@ func TestLocalRoutesRejectBrowserOriginsBeforeDispatch(t *testing.T) {
 		"/agent.v1.AgentService/RunSSE",
 		"/aiserver.v1.InferenceService/RunInferenceSSE",
 		"/aiserver.v1.BidiService/BidiAppend",
-		"/aiserver.v1.AiService/StreamBugBotAgenticSSE",
 		"/aiserver.v1.AiService/NameTab",
 		"/aiserver.v1.AiService/WriteGitBranchName",
-		"/aiserver.v1.AiService/WriteGitCommitMessage",
 		"/aiserver.v1.AiService/CppConfig",
 		"/aiserver.v1.AiService/StreamCpp",
 	}

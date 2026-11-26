@@ -292,12 +292,9 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 			if path == "/aiserver.v1.AiService/WriteGitBranchName" {
 				return req, handleNativeText(req, resolver, selectedModel("commit"))
 			}
-			if path == "/aiserver.v1.AiService/WriteGitCommitMessage" {
-				return req, handleWriteGitCommitMessage(req, resolver, selectedModel("commit"))
-			}
-			if path == "/aiserver.v1.AiService/StreamBugBotAgenticSSE" {
-				return req, handleBugBotRunSSE(req, serverCtx, resolver, selectedModel("review"))
-			}
+			// Commit messages and Agent Review use Cursor's native services.
+			// Fix All Issues submits a normal chat prompt, so its Agent/Inference
+			// request still follows the BYOK routes above.
 			return nativePassthroughRequest(req)
 		}
 		return req, nil
@@ -377,35 +374,6 @@ func handleBidiAppend(req *http.Request) *http.Response {
 func handleRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver) *http.Response {
 	return streamAgentResponse(req, serverCtx, agent.RunSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
 		agent.HandleRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver)
-	})
-}
-
-func handleWriteGitCommitMessage(req *http.Request, resolver agent.AdapterResolver, selectedModel string) *http.Response {
-	body, err := readDecodedBody(req)
-	if err != nil {
-		return makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"read body: `+err.Error()+`"}`)
-	}
-	res := agent.HandleWriteGitCommitMessage(req.Context(), body, req.Header.Get("Content-Type"), resolver, selectedModel)
-	hdr := http.Header{}
-	if res.ContentType != "" {
-		hdr.Set("Content-Type", res.ContentType)
-	}
-	return &http.Response{
-		Status:        http.StatusText(res.Status),
-		StatusCode:    res.Status,
-		Proto:         req.Proto,
-		ProtoMajor:    req.ProtoMajor,
-		ProtoMinor:    req.ProtoMinor,
-		Body:          io.NopCloser(bytes.NewReader(res.Body)),
-		ContentLength: int64(len(res.Body)),
-		Header:        hdr,
-		Request:       req,
-	}
-}
-
-func handleBugBotRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver, selectedModel string) *http.Response {
-	return streamAgentResponse(req, serverCtx, agent.BugBotSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
-		agent.HandleBugBotRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver, selectedModel)
 	})
 }
 

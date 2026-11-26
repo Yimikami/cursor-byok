@@ -19,6 +19,8 @@ const bidiRouteLimit = 64 << 20
 // These shared-Bidi mappings come from Cursor 3.32.4's BidiTransport factory.
 // All other native RPCs retain their ordinary passthrough behavior.
 var nativeBidiStreams = map[string]bool{
+	"/aiserver.v1.AiService/StreamBugBotAgenticSSE":                     false,
+	"/aiserver.v1.AiService/StreamBugBotAgenticPoll":                    true,
 	"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE":            false,
 	"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsPoll":           true,
 	"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsIdempotentSSE":  false,
@@ -32,11 +34,11 @@ var nativeBidiStreams = map[string]bool{
 }
 
 func localBidiStream(path string) bool {
-	return path == "/agent.v1.AgentService/RunSSE" || path == "/aiserver.v1.InferenceService/RunInferenceSSE" || path == "/aiserver.v1.AiService/StreamBugBotAgenticSSE"
+	return path == "/agent.v1.AgentService/RunSSE" || path == "/aiserver.v1.InferenceService/RunInferenceSSE"
 }
 
 func unsupportedLocalBidiPoll(path string) bool {
-	return path == "/agent.v1.AgentService/RunPoll" || path == "/aiserver.v1.InferenceService/RunInferencePoll" || path == "/aiserver.v1.AiService/StreamBugBotAgenticPoll"
+	return path == "/agent.v1.AgentService/RunPoll" || path == "/aiserver.v1.InferenceService/RunInferencePoll"
 }
 
 func localProxyPath(path string) bool {
@@ -46,7 +48,7 @@ func localProxyPath(path string) bool {
 	switch path {
 	case "/aiserver.v1.AiService/CppConfig", "/aiserver.v1.AiService/StreamCpp", "/aiserver.v1.CppService/AvailableModels":
 		return true
-	case "/aiserver.v1.AiService/GetDefaultModel", "/agent/v1/run", "/aiserver.v1.AiService/AvailableModels", "/aiserver.v1.AiService/GetDefaultModelNudgeData", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName", "/aiserver.v1.AiService/WriteGitCommitMessage":
+	case "/aiserver.v1.AiService/GetDefaultModel", "/agent/v1/run", "/aiserver.v1.AiService/AvailableModels", "/aiserver.v1.AiService/GetDefaultModelNudgeData", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName":
 		return true
 	}
 	return false

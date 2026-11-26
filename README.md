@@ -69,7 +69,11 @@ Core agent and model endpoints:
 | `/aiserver.v1.AiService/GetDefaultModel`         | default from your configured BYOK models |
 | `/aiserver.v1.AiService/GetDefaultModelNudgeData` | synthetic default-model hint            |
 
-The proxy also handles chat titles, branch/commit generation and BugBot.
+The proxy also handles chat titles and branch names. Agent Review and commit
+message generation stay on Cursor's native services. **Fix All Issues** prepares
+a normal Agent prompt and continues through your selected BYOK chat model.
+Plugin marketplace, voice and other hosted features retain native routing and
+Cursor account eligibility.
 Cloud background-agent RPCs and other native requests pass through to Cursor
 with their original authentication and verified upstream TLS. Cloud model
 preferences remain native; local BYOK IDs are not advertised as cloud defaults.
