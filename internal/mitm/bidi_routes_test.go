@@ -220,7 +220,10 @@ func TestNativeBidiReplayThroughProxy(t *testing.T) {
 			if !reviewPath(tc.path) && (localBidiStream(tc.path) || unsupportedLocalBidiPoll(tc.path) || paidLocalPath(tc.path)) {
 				t.Fatal("native stream classified as local BYOK")
 			}
-			p := nativeTestProxy(t, "cursor")
+			p := nativeTestProxyWithAuthorizer(t, "cursor", func(context.Context, http.Header) bool {
+				t.Error("native Bidi flow accessed local account state")
+				return false
+			})
 			var mu sync.Mutex
 			var paths []string
 			var bodies [][]byte

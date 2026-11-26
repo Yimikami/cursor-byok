@@ -218,7 +218,10 @@ func TestStopCancelsLegacySSEBeforeProviderFirstByte(t *testing.T) {
 	s, client := testProxy(t, provider.URL)
 	id := t.Name()
 	body, _ := proto.Marshal(&aiserverv1.BidiAppendRequest{RequestId: &aiserverv1.BidiRequestId{RequestId: id}, Data: hex.EncodeToString(wsRunMessage(t, "wait for provider"))})
-	response, err := client.Post("https://api2.cursor.sh/aiserver.v1.BidiService/BidiAppend", "application/proto", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", "https://api2.cursor.sh/aiserver.v1.BidiService/BidiAppend", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/proto")
+	req.Header.Set("Authorization", "Bearer fixture-account")
+	response, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +233,10 @@ func TestStopCancelsLegacySSEBeforeProviderFirstByte(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		response, _ := client.Post("https://api2.cursor.sh/agent.v1.AgentService/RunSSE", "application/proto", bytes.NewReader(body))
+		req, _ := http.NewRequest("POST", "https://api2.cursor.sh/agent.v1.AgentService/RunSSE", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/proto")
+		req.Header.Set("Authorization", "Bearer fixture-account")
+		response, _ := client.Do(req)
 		if response != nil {
 			_, _ = io.Copy(io.Discard, response.Body)
 			response.Body.Close()

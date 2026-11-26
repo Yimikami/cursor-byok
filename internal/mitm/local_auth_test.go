@@ -59,7 +59,7 @@ func TestPaidRoutesRequireOwnerBeforeReadingOrProvider(t *testing.T) {
 	}))
 	defer provider.Close()
 	_, client := testProxyWithAuthorizer(t, provider.URL, testOwnerAuthorization)
-	for _, path := range []string{"/aiserver.v1.BidiService/BidiAppend", "/agent.v1.AgentService/RunSSE", "/aiserver.v1.InferenceService/RunInferenceSSE"} {
+	for _, path := range []string{"/agent.v1.AgentService/RunSSE", "/aiserver.v1.InferenceService/RunInferenceSSE"} {
 		for _, token := range []string{"", "Bearer other-account"} {
 			req, _ := http.NewRequest("POST", "https://api2.cursor.sh"+path, bytes.NewBufferString("not protobuf"))
 			if token != "" {
@@ -135,5 +135,37 @@ func TestWebSocketAuthorizesNativeRunStartHeaders(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestQueuedBidiInputCannotAuthorizeLocalInference(t *testing.T) {
+	p := nativeTestProxyWithAuthorizer(t, "cursor", func(context.Context, http.Header) bool { return false })
+	req := routeAppendRequest("untrusted-pending", 0, inferenceSSEStart(), false)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("pending input status %d", rec.Code)
+	}
+	// Pending input has no execution destination; claiming it as BYOK still
+	// requires the current local account, even when native Review is selected.
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, routeStreamRequest("untrusted-pending", inferenceSSEPath, false))
+	if rec.Code != 401 {
+		t.Fatalf("queued input bypassed local authorization: %d", rec.Code)
+	}
+}
+
+func TestEstablishedLocalAppendStillRequiresAccount(t *testing.T) {
+	routes := newBidiRouteRegistry()
+	defer routes.close()
+	_, blocked, lease := routes.claim(routeStreamRequest("local-owner", inferenceSSEPath, false), "local", false, context.Background(), nil)
+	if blocked != nil || lease == nil {
+		t.Fatal("local fixture claim failed")
+	}
+	defer lease.close()
+	_, response := routes.append(routeAppendRequest("local-owner", 0, inferenceSSEStart(), false), func(context.Context, http.Header) bool { return false })
+	defer closeRouteResponse(response)
+	if response == nil || response.StatusCode != 401 {
+		t.Fatal("late local append bypassed account check")
 	}
 }

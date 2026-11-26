@@ -1,4 +1,5 @@
 export type ModelAdapter = {
+  id?: string;
   displayName: string;
   type: string;
   baseURL: string;

@@ -1,10 +1,13 @@
 package bridge
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -61,4 +64,41 @@ func (s *ProxyService) saveAdapterTestResult(index int, tested, result ModelAdap
 	cfg.ModelAdapters[index].LastTestedAt = result.LastTestedAt
 	cfg.ModelAdapters[index].LastTestResult = result.LastTestResult
 	return writeConfigLocked(s.cfgDir, cfg)
+}
+
+// Adapter identity belongs to the configuration, not the provider model name.
+// It survives rename/reorder/key rotation and distinguishes identical model IDs
+// on different accounts/providers without putting a credential in a selector.
+func ensureAdapterIDs(cfg *UserConfig) (bool, error) {
+	changed := false
+	seen := map[string]bool{}
+	for i := range cfg.ModelAdapters {
+		a := &cfg.ModelAdapters[i]
+		if a.ID == "" || seen[a.ID] {
+			var raw [16]byte
+			if _, err := rand.Read(raw[:]); err != nil {
+				return false, err
+			}
+			a.ID = hex.EncodeToString(raw[:])
+			changed = true
+		}
+		seen[a.ID] = true
+	}
+	// Preserve the previously effective adapter when migrating the old model-only selection.
+	if cfg.ReviewModelID != "" && !strings.HasPrefix(cfg.ReviewModelID, "adapter:") {
+		requested := strings.TrimSpace(cfg.ReviewModelID)
+		adapters := adapterListFromConfig(*cfg)
+		if len(adapters) > 0 {
+			selected := adapters[0]
+			for _, a := range adapters {
+				if strings.EqualFold(requested, a.ModelID) || strings.EqualFold(requested, a.DisplayName) || strings.EqualFold(requested, a.StableID()) {
+					selected = a
+					break
+				}
+			}
+			cfg.ReviewModelID = "adapter:" + selected.ConfigID
+			changed = true
+		}
+	}
+	return changed, nil
 }

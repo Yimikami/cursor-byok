@@ -62,6 +62,7 @@ func (l *lockedWriter) Flush() {
 }
 
 type AdapterTarget struct {
+	ConfigID     string
 	ProviderType string
 	BaseURL      string
 	APIKey       string
@@ -87,6 +88,7 @@ type AdapterOpts struct {
 
 func AdapterTargetFromRelay(a relay.AdapterInfo) AdapterTarget {
 	return AdapterTarget{
+		ConfigID:     a.ConfigID,
 		ProviderType: a.Type,
 		BaseURL:      a.BaseURL,
 		APIKey:       a.APIKey,
@@ -136,6 +138,23 @@ func ResolveAdapterForAgentSession(adapters []AdapterTarget, sess *Session) (Ada
 		}
 	}
 	return target, ok
+}
+
+// ResolveAdapterForReview accepts persistent configuration identities without
+// changing native Cursor model-name resolution for ordinary inference.
+func ResolveAdapterForReview(adapters []AdapterTarget, requested string) (AdapterTarget, bool) {
+	requested = strings.TrimSpace(requested)
+	if strings.HasPrefix(requested, "adapter:") {
+		id := strings.TrimPrefix(requested, "adapter:")
+		for _, a := range adapters {
+			if id != "" && a.ConfigID == id {
+				return a, true
+			}
+		}
+		return AdapterTarget{}, false // A removed explicit selection must not bill another adapter.
+	}
+
+	return ResolveAdapterForModel(adapters, requested)
 }
 
 func ResolveAdapterForBugBotRequest(adapters []AdapterTarget, req *aiserverv1.StreamBugBotRequest) (AdapterTarget, bool) {

@@ -60,6 +60,7 @@ func adapterListFromConfig(c UserConfig) []relay.AdapterInfo {
 			continue
 		}
 		out = append(out, relay.AdapterInfo{
+			ConfigID:                a.ID,
 			DisplayName:             a.DisplayName,
 			Type:                    a.Type,
 			ModelID:                 a.ModelID,
@@ -347,12 +348,25 @@ func (s *ProxyService) SetBaseURL(url string) (ProxyState, error) {
 }
 
 func (s *ProxyService) LoadUserConfig() (UserConfig, error) {
-	return readConfig(s.cfgDir)
+	configMu.Lock()
+	defer configMu.Unlock()
+	cfg, err := readConfigLocked(s.cfgDir)
+	if err != nil {
+		return cfg, err
+	}
+	changed, err := ensureAdapterIDs(&cfg)
+	if err == nil && changed {
+		err = writeConfigLocked(s.cfgDir, cfg)
+	}
+	return cfg, err
 }
 
 func (s *ProxyService) SaveUserConfig(cfg UserConfig) error {
 	configMu.Lock()
 	defer configMu.Unlock()
+	if _, err := ensureAdapterIDs(&cfg); err != nil {
+		return err
+	}
 	cfg.ActiveModelID = strings.TrimSpace(cfg.ActiveModelID)
 	if cfg.ActiveModelID != "" {
 		found := false

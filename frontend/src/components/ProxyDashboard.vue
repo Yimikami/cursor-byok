@@ -218,6 +218,13 @@ const modelOptions = computed(() =>
   })),
 );
 
+const reviewModelOptions = computed(() =>
+  cfg.value.modelAdapters.filter(a => a.id && a.modelID).map(a => ({
+    value: `adapter:${a.id}`,
+    label: `${a.displayName || a.modelID} (${a.modelID})`,
+  })),
+);
+
 const shortFP = computed(() =>
   state.value.caFingerprint
     ? state.value.caFingerprint.slice(0, 10) +
@@ -390,6 +397,7 @@ function openEditor(i: number) {
     editorIndex.value = -1;
     editorProvider.value = providerTab.value;
     editorModel.value = {
+      id: crypto.randomUUID(),
       displayName: "",
       type: providerTab.value,
       baseURL: "",
@@ -438,6 +446,7 @@ async function saveEditor(runTest = false) {
   }
   const index = editorIndex.value;
   const savedEditor = editorModel.value;
+  const savedProvider = editorProvider.value;
   const probe = captureAdapterProbe(cfg.value.modelAdapters[index]);
   await persistConfig();
   if (runTest) {
@@ -446,12 +455,14 @@ async function saveEditor(runTest = false) {
       const updated = (await ProxyService.TestAdapter(index)) as ModelAdapter;
       const applied = applyAdapterProbeResult(cfg.value.modelAdapters[index], probe, updated);
       if (applied && editorIndex.value === index && editorModel.value === savedEditor
+        && editorProvider.value === savedProvider
         && adapterProbeFingerprint(savedEditor) === probe.fingerprint
         && currentView.value === "editor") currentView.value = "models";
     } finally {
       editorTestRunning.value = false;
     }
   } else if (editorIndex.value === index && editorModel.value === savedEditor
+    && editorProvider.value === savedProvider
     && adapterProbeFingerprint(savedEditor) === probe.fingerprint) {
     currentView.value = "models";
   }
@@ -485,6 +496,7 @@ async function duplicate(i: number) {
   const dup = JSON.parse(
     JSON.stringify(cfg.value.modelAdapters[i]),
   ) as ModelAdapter;
+  dup.id = crypto.randomUUID();
   dup.displayName += " (Copy)";
   cfg.value.modelAdapters.push(dup);
   await persistConfig();
@@ -499,7 +511,7 @@ async function removeAdapter(i: number) {
   if (removed && cfg.value.commitModelID === removed.modelID) {
     cfg.value.commitModelID = "";
   }
-  if (removed && cfg.value.reviewModelID === removed.modelID) {
+  if (removed && (cfg.value.reviewModelID === removed.modelID || cfg.value.reviewModelID === `adapter:${removed.id}`)) {
     cfg.value.reviewModelID = "";
   }
   await persistConfig();
@@ -805,7 +817,7 @@ onBeforeUnmount(() => {
                 <span>Code review model</span>
                 <select v-model="cfg.reviewModelID" @change="persistConfig">
                   <option value="">Default BYOK model</option>
-                  <option v-for="opt in modelOptions" :key="`review-${opt.value}`" :value="opt.value">
+                  <option v-for="opt in reviewModelOptions" :key="`review-${opt.value}`" :value="opt.value">
                     {{ opt.label }}
                   </option>
                 </select>

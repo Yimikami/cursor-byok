@@ -11,10 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep native voice/review Bidi input independent of local account decryption, while retaining account authorization before BYOK inference and late local input.
+- Keep active native review polls on their original destination when the review setting changes, and distinguish review adapters with identical provider model names using persistent adapter identities.
+
 - Make Agent Review use BYOK by default, with a dashboard choice for Cursor Bugbot that explains native usage and limits. Never silently fall back between billing providers. Fix All Issues continues through BYOK chat.
 - Keep chat titles, branch names, Tab and commit messages on Cursor's native services. Preserve native authentication, errors and quotas without extra BYOK generation calls.
 - Accept qualitative confidence labels in otherwise valid BYOK review reports without inventing numeric scores; request explicit numeric confidence and reject malformed/truncated results.
-- Isolate adapter editor drafts from saved settings during Save and Test, so editing and canceling while a probe runs cannot leak canceled changes into a later save.
+- Isolate adapter editor drafts from saved settings during Save and Test, so editing and canceling while a probe runs cannot leak canceled changes into a later save; keep unsaved provider changes open.
 
 - Publish configuration changes as complete private snapshots and serialize readers/writers; prevent a delayed adapter probe from overwriting newer settings.
 - Restore the native model selector for configured BYOK adapters on macOS and Windows using Cursor's own-key mode and named-model view, with exact preference restoration and protection for disabled saved native keys.

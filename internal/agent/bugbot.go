@@ -111,7 +111,7 @@ func HandleBugBotRunSSE(ctx context.Context, reqBody []byte, contentType string,
 	}
 	target, ok := ResolveAdapterForBugBotRequest(resolve(), sess.BugBotRequest)
 	if strings.TrimSpace(selectedModel) != "" {
-		target, ok = ResolveAdapterForModel(resolve(), selectedModel)
+		target, ok = ResolveAdapterForReview(resolve(), selectedModel)
 	}
 	if !ok {
 		writeBugBotEndStreamError(w, "no BYOK adapter configured")

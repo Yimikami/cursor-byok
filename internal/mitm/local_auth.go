@@ -30,7 +30,7 @@ func paidLocalPath(path string) bool {
 		return true
 	}
 	switch path {
-	case "/aiserver.v1.BidiService/BidiAppend", "/aiserver.v1.AiService/StreamBugBotAgentic":
+	case "/aiserver.v1.AiService/StreamBugBotAgentic":
 		return true
 	}
 	return false
