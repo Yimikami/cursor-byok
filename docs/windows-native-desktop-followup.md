@@ -5,6 +5,10 @@ the configured Provider A model-a provider, and a disposable local project. They
 extend the earlier protocol and Windows checks; they do not establish complete
 parity with every Cursor-hosted service.
 
+The later [Windows acceptance at `a2a8c5b`](windows-native-20261126.md) passed
+the native picker and CreatePlan/Build. Earlier failures and the companion-picker
+experiment below are historical and do not describe the released routing.
+
 ## Model selection (PR #16 experiment; excluded from this release)
 
 The optional companion implementation below was evaluated on the Windows
@@ -44,7 +48,7 @@ the updated proxy build from this PR.
 | MCP tool | Local stdio fixture connected; native one-time approval; `echo_marker` returned `BYOK_MCP_OK:CURSOR_NATIVE_20261126`. |
 | MCP resource | `fixture://marker` returned `BYOK_RESOURCE_OK`. |
 | Ask | Found `return a - b` in the fixture and returned `ASK_OK`; no edits or shell commands requested. |
-| Plan / Build | Native plan editor and Build button opened. Build created greeting files, updated todos, and ran two passing unittest tests. **CreatePlan failed in this Windows run**; the later shared fix passed on macOS, with Windows retest pending. |
+| Plan / Build | Native plan editor and Build button opened. Build created greeting files, updated todos, and ran two passing unittest tests. **CreatePlan failed in this Windows run**; the later shared fix passed on macOS and in the Windows acceptance at `a2a8c5b`. |
 | Debug | Native hypotheses, instrumentation, log panel, reproduction, fix, and cleanup completed. `add(2, 3)` changed from -1 to 5; the explicit regression function passed after instrumentation removal. |
 | Multitask | Two actual native Explorer Task subagents completed; the final response contained the probe marker and `Hello, Alice!`. |
 | Commit generation | Native SCM action populated the message field with a relevant message; no commit or push of the scratch project was performed. |

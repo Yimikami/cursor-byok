@@ -1,6 +1,6 @@
 # macOS native compatibility investigation — 2026-11-26
 
-Later acceptance supersedes the historical pending statuses below: [Windows native acceptance](windows-native-20261126.md) and [native services / voice follow-up](native-services-20261126.md). Commit generation and Agent Review now stay native; older BYOK-route results below describe the earlier implementation.
+Later acceptance supersedes the historical pending statuses below: [Windows native acceptance](windows-native-20261126.md) and [native services / voice follow-up](native-services-20261126.md). Commit generation, titles, branch names and Tab now stay native. Agent Review defaults to BYOK with explicit Cursor Bugbot opt-in; see [current routing and usage](native-auxiliary-20261126.md). Older route results below describe their recorded implementation.
 
 ## Static evidence
 
