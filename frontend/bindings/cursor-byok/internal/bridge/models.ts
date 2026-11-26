@@ -93,6 +93,7 @@ export class DailyUsageEntry {
 }
 
 export class ModelAdapterConfig {
+    "id"?: string;
     "displayName": string;
     "type": string;
     "baseURL": string;

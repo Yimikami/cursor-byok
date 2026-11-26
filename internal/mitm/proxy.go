@@ -201,6 +201,19 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		// retain their original route in the registry even if settings change.
 		nativeReview := isCursorAPI2Host(req.URL.Host) && reviewPath(req.URL.Path) &&
 			selectedModel != nil && selectedModel("review-route") == "cursor"
+		if !nativeReview && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
+			return req, makeJSONResp(req, http.StatusForbidden, `{"code":"permission_denied","message":"BYOK requests must originate from the Cursor desktop application"}`)
+		}
+		if req.Method != http.MethodOptions && isCursorAPI2Host(req.URL.Host) && reviewPath(req.URL.Path) &&
+			(strings.HasSuffix(req.URL.Path, "SSE") || strings.HasSuffix(req.URL.Path, "Poll")) {
+			mode, err := bidiRoutes.existingMode(req, strings.HasSuffix(req.URL.Path, "Poll"))
+			if err != nil {
+				return req, bidiRouteError(req, http.StatusBadRequest, err.Error())
+			}
+			if mode != "" {
+				nativeReview = mode == "native"
+			}
+		}
 		if nativeReview {
 			*req = *req.WithContext(context.WithValue(req.Context(), nativeReviewRequestKey{}, true))
 		}
@@ -240,7 +253,7 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 				return req, makeJSONResp(req, http.StatusNotImplemented, `{"code":"unimplemented","message":"Local BYOK polling is not supported; use WebSocket or SSE"}`)
 			}
 			if path == "/aiserver.v1.BidiService/BidiAppend" {
-				return bidiRoutes.append(req)
+				return bidiRoutes.append(req, authorize)
 			}
 			if nativeReview && path == "/aiserver.v1.AiService/StreamBugBotAgentic" {
 				return nativePassthroughRequest(req)

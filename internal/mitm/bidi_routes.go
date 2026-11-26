@@ -153,6 +153,48 @@ func readBidiBody(req *http.Request) (raw, decoded []byte, err error) {
 	return raw, decoded, err
 }
 
+// existingMode preserves the billing destination of an already claimed stream
+// across setting changes. Reading the envelope restores the original wire body.
+func (r *bidiRouteRegistry) existingMode(req *http.Request, poll bool) (string, error) {
+	// New/unrecognized accounts must reach the normal authorization guard
+	// without consuming their request body. Only a previously claimed owner
+	// can ask to retain a route across setting changes.
+	credential := bidiCredential(req)
+	r.mu.Lock()
+	knownOwner := false
+	for _, entry := range r.entries {
+		if entry.mode != "" && entry.credential == credential && (entry.active > 0 || time.Since(entry.touched) <= 2*time.Minute) {
+			knownOwner = true
+			break
+		}
+	}
+	r.mu.Unlock()
+	if !knownOwner {
+		return "", nil
+	}
+	_, decoded, err := readBidiBody(req)
+	if err != nil {
+		return "", err
+	}
+	id, err := agent.InspectBidiStream(decoded, req.Header.Get("Content-Type"), poll)
+	if err != nil {
+		return "", err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return "", fmt.Errorf("proxy is stopping")
+	}
+	entry := r.entries[bidiRouteKey(req, id)]
+	if entry == nil || (entry.active == 0 && time.Since(entry.touched) > 2*time.Minute) {
+		return "", nil
+	}
+	if entry.credential != bidiCredential(req) {
+		return "", fmt.Errorf("bidi stream credentials do not match")
+	}
+	return entry.mode, nil
+}
+
 func bidiRouteError(req *http.Request, status int, message string) *http.Response {
 	code := "invalid_argument"
 	if status == 429 {
@@ -166,7 +208,20 @@ func bidiRouteError(req *http.Request, status int, message string) *http.Respons
 
 // append either delivers locally, passes an established native request through,
 // or retains the exact original HTTP request until the stream selects a route.
-func (r *bidiRouteRegistry) append(req *http.Request) (*http.Request, *http.Response) {
+func (r *bidiRouteRegistry) append(req *http.Request, authorizers ...localAuthorizer) (*http.Request, *http.Response) {
+	// Before a stream claims the ID, an append is only bounded pending input:
+	// it cannot invoke a provider. Native authorization belongs to Cursor;
+	// local authorization is required when the local stream claims it and
+	// again for late local appends. Never load local account state for native input.
+	if len(authorizers) > 0 {
+		parts := strings.Fields(req.Header.Get("Authorization"))
+		if len(req.Header.Values("Authorization")) != 1 || len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			return req, makeJSONResp(req, http.StatusUnauthorized, `{"code":"unauthenticated","message":"Bidi input requires native Cursor credentials."}`)
+		}
+		if _, blocked := nativePassthroughRequest(req); blocked != nil {
+			return req, blocked
+		}
+	}
 	raw, decoded, err := readBidiBody(req)
 	if err != nil {
 		return req, bidiRouteError(req, 400, err.Error())
@@ -183,6 +238,19 @@ func (r *bidiRouteRegistry) append(req *http.Request) (*http.Request, *http.Resp
 		return req, bidiRouteError(req, 400, err.Error())
 	}
 	mode := entry.mode
+	if mode == "local" && len(authorizers) > 0 {
+		// Do not hold the routing mutex while reading/decrypting account state.
+		r.mu.Unlock()
+		authorize := authorizers[0]
+		if authorize == nil || !authorize(req.Context(), req.Header) {
+			return req, makeJSONResp(req, http.StatusUnauthorized, `{"code":"unauthenticated","message":"Local inference requires the current Cursor account."}`)
+		}
+		r.mu.Lock()
+		if r.closed || r.entries[bidiRouteKey(req, id)] != entry {
+			r.mu.Unlock()
+			return req, bidiRouteError(req, 409, "bidi stream is no longer available")
+		}
+	}
 	if !entry.ready {
 		mode = "" // Keep new appends behind any pending/retrying replay.
 		if _, exists := entry.pending[seq]; !exists {
@@ -202,6 +270,7 @@ func (r *bidiRouteRegistry) append(req *http.Request) (*http.Request, *http.Resp
 	r.mu.Unlock()
 	switch mode {
 	case "native":
+		*req = *req.WithContext(context.WithValue(req.Context(), nativeReviewRequestKey{}, true))
 		return nativePassthroughRequest(req)
 	case "local":
 		return req, handleBidiAppend(req)

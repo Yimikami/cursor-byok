@@ -8,7 +8,7 @@ const helpers = await import(`data:text/javascript;base64,${Buffer.from(compile(
 // Exercise the actual component handlers while a backend probe is pending.
 const component = readFileSync(new URL('./components/ProxyDashboard.vue', import.meta.url), 'utf8').split('<script setup lang="ts">')[1].split('</script>')[0];
 const ast = ts.createSourceFile('dashboard.ts', component, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && ['openEditor', 'cancelEditor', 'saveEditor'].includes(node.name?.text)).map(node => node.getText(ast)).join('\n');
+const handlers = ast.statements.filter(node => ts.isFunctionDeclaration(node) && ['openEditor', 'cancelEditor', 'saveEditor', 'duplicate'].includes(node.name?.text)).map(node => node.getText(ast)).join('\n');
 const ref = value => ({ value });
 const adapter = () => ({ displayName: 'Fixture', type: 'openai', baseURL: 'https://example.test', apiKey: 'fixture', modelID: 'first', supportedThinkingLevels: ['low'], notes: '' });
 
@@ -20,7 +20,7 @@ function fixture() {
   const state = { cfg, editorModel: ref(null), editorIndex: ref(-1), editorProvider: ref('openai'), providerTab: ref('openai'), showApiKey: ref(false), currentView: ref('models'), editorTestRunning: ref(false) };
   const persistConfig = async () => { writes.push(JSON.parse(JSON.stringify(cfg.value))); };
   const scope = { ...state, ...helpers, persistConfig, ProxyService: { TestAdapter: () => probe } };
-  const api = new Function(...Object.keys(scope), compile(handlers) + '\nreturn {openEditor, cancelEditor, saveEditor};')(...Object.values(scope));
+  const api = new Function(...Object.keys(scope), compile(handlers) + '\nreturn {openEditor, cancelEditor, saveEditor, duplicate};')(...Object.values(scope));
   return { ...state, ...api, writes, persistConfig, finishProbe };
 }
 
@@ -67,4 +67,36 @@ test('an unchanged saved editor closes after the probe', async () => {
   f.finishProbe({ ...f.cfg.value.modelAdapters[0], lastTestResult: 'ok' });
   await pending;
   assert.equal(f.currentView.value, 'models');
+});
+
+test('review choices distinguish identical model names and survive reordering', () => {
+  const declaration = ast.statements.find(node => ts.isVariableStatement(node) && node.declarationList.declarations.some(d => d.name.getText(ast) === 'reviewModelOptions'));
+  assert.ok(declaration);
+  const getOptions = new Function('computed', 'cfg', compile(declaration.getText(ast)) + '; return reviewModelOptions;');
+  const first = {...adapter(), id:'first', displayName:'Provider A'};
+  const second = {...adapter(), id:'second', displayName:'Provider B'};
+  const options = rows => getOptions(fn => fn(), ref({modelAdapters:rows}));
+  assert.deepEqual(options([first,second]).map(x => x.value), ['adapter:first','adapter:second']);
+  assert.equal(options([second,first])[0].value,'adapter:second');
+  assert.notEqual(options([first,second])[0].label,options([first,second])[1].label);
+});
+
+test('duplicating an adapter creates a distinct selectable identity', async () => {
+  const f = fixture();
+  f.cfg.value.modelAdapters[0].id = 'original';
+  await f.duplicate(0);
+  assert.notEqual(f.cfg.value.modelAdapters[1].id,'original');
+  assert.ok(f.cfg.value.modelAdapters[1].id);
+  assert.equal(f.cfg.value.modelAdapters[1].modelID,f.cfg.value.modelAdapters[0].modelID);
+});
+
+test('provider changes during a probe stay open and unsaved', async () => {
+  const f = fixture();f.openEditor(0);
+  const pending = f.saveEditor(true);await Promise.resolve();
+  const saved = {...f.cfg.value.modelAdapters[0]};
+  f.editorProvider.value = 'anthropic';
+  f.finishProbe({...saved,lastTestResult:'ok'});await pending;
+  assert.equal(f.currentView.value,'editor');
+  assert.equal(f.editorProvider.value,'anthropic');
+  assert.equal(f.cfg.value.modelAdapters[0].type,'openai');
 });

@@ -41,6 +41,7 @@ func inferenceAppend(t *testing.T, ctx context.Context, client *http.Client, id 
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/proto")
+	req.Header.Set("Authorization", "Bearer fixture-account")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +103,7 @@ func inferenceStart(t *testing.T, ctx context.Context, client *http.Client, id s
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/proto")
+	req.Header.Set("Authorization", "Bearer fixture-account")
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)

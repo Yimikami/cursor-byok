@@ -1,6 +1,7 @@
 package bridge
 
 import (
+	"cursor-byok/internal/agent"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -164,5 +165,53 @@ func TestAdapterProbeDoesNotRevertConcurrentEdits(t *testing.T) {
 				t.Fatal("completed probe overwrote newer settings or attached a result to a changed adapter")
 			}
 		})
+	}
+}
+
+func TestReviewAdapterIdentitySurvivesMigrationAndReorder(t *testing.T) {
+	s := &ProxyService{cfgDir: t.TempDir()}
+	legacy := UserConfig{ReviewModelID: "shared-model", ModelAdapters: []ModelAdapterConfig{
+		{DisplayName: "First", Type: "openai", BaseURL: "https://first.example", ModelID: "shared-model", APIKey: "first-key"},
+		{DisplayName: "Second", Type: "openai", BaseURL: "https://second.example", ModelID: "shared-model", APIKey: "second-key"},
+	}}
+	if err := writeConfigLocked(s.cfgDir, legacy); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := s.LoadUserConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ModelAdapters[0].ID == "" || cfg.ModelAdapters[0].ID == cfg.ModelAdapters[1].ID || cfg.ReviewModelID != "adapter:"+cfg.ModelAdapters[0].ID {
+		t.Fatal("legacy adapter identity migration failed")
+	}
+	chosenID := cfg.ModelAdapters[1].ID
+	cfg.ReviewModelID = "adapter:" + chosenID
+	cfg.ModelAdapters[0], cfg.ModelAdapters[1] = cfg.ModelAdapters[1], cfg.ModelAdapters[0]
+	cfg.ModelAdapters[0].DisplayName = "Renamed"
+	cfg.ModelAdapters[0].APIKey = "rotated-key"
+	if err := s.SaveUserConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.LoadUserConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var targets []agent.AdapterTarget
+	for _, a := range adapterListFromConfig(again) {
+		targets = append(targets, agent.AdapterTargetFromRelay(a))
+	}
+	target, ok := agent.ResolveAdapterForReview(targets, again.ReviewModelID)
+	if !ok || target.ConfigID != chosenID || target.BaseURL != "https://second.example" || target.APIKey != "rotated-key" {
+		t.Fatalf("wrong adapter after reorder: %s %s", target.ConfigID, target.BaseURL)
+	}
+	if _, ok := agent.ResolveAdapterForReview(targets, "adapter:removed-id"); ok {
+		t.Fatal("removed review selection fell back to another provider")
+	}
+	if _, err := s.LoadUserConfig(); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := readConfig(s.cfgDir)
+	if stored.ModelAdapters[0].ID != chosenID {
+		t.Fatal("identity changed on repeated load")
 	}
 }

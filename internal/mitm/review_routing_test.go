@@ -116,3 +116,56 @@ func TestCursorReviewOptInPreservesNativeRoutes(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeReviewPollKeepsRouteAfterSettingChange(t *testing.T) {
+	ca, err := certs.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native atomic.Bool
+	native.Store(true)
+	s, err := newWithAuthorizer("127.0.0.1:0", ca, nil, func() []agent.AdapterTarget { t.Error("native poll resolved BYOK"); return nil }, func(purpose string) string {
+		if purpose == "review-route" && native.Load() {
+			return "cursor"
+		}
+		return ""
+	}, func(_ context.Context, headers http.Header) bool {
+		return headers.Get("Authorization") == "Bearer native-test-token"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+	p := s.srv.Handler.(*goproxy.ProxyHttpServer)
+	calls := 0
+	p.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+		ctx.RoundTripper = goproxy.RoundTripperFunc(func(r *http.Request, _ *goproxy.ProxyCtx) (*http.Response, error) {
+			calls++
+			return &http.Response{StatusCode: 200, Header: http.Header{"Access-Control-Allow-Origin": {"native-origin"}}, Body: io.NopCloser(bytes.NewBufferString("native-poll")), Request: r}, nil
+		})
+		return req, nil
+	})
+	path := "/aiserver.v1.AiService/StreamBugBotAgenticPoll"
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, routeStreamRequest("active-review", path, true))
+		if rec.Code != 200 || rec.Body.String() != "native-poll" || rec.Header().Get("Access-Control-Allow-Origin") != "native-origin" {
+			t.Fatalf("poll %d: %d %s", i, rec.Code, rec.Body.String())
+		}
+		native.Store(false)
+	}
+	// A new review follows the new BYOK setting and cannot incur native charges.
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, routeStreamRequest("new-review", path, true))
+	if rec.Code != 501 || calls != 2 {
+		t.Fatalf("new poll=%d native calls=%d", rec.Code, calls)
+	}
+	// Knowing a request ID does not grant access to its previously native route.
+	req := routeStreamRequest("active-review", path, true)
+	req.Header.Set("Authorization", "Bearer another-account")
+	rec = httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != 501 || calls != 2 {
+		t.Fatalf("wrong owner poll=%d calls=%d", rec.Code, calls)
+	}
+}

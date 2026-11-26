@@ -14,6 +14,7 @@ type ProxyState struct {
 }
 
 type ModelAdapterConfig struct {
+	ID                      string   `json:"id,omitempty"`
 	DisplayName             string   `json:"displayName"`
 	Type                    string   `json:"type"`
 	BaseURL                 string   `json:"baseURL"`

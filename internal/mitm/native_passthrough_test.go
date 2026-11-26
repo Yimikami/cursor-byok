@@ -26,16 +26,25 @@ var legacyLocalTokenFixture = func() string {
 
 func nativeTestProxy(t *testing.T, reviewRoute ...string) *goproxy.ProxyHttpServer {
 	t.Helper()
+	route := ""
+	if len(reviewRoute) > 0 {
+		route = reviewRoute[0]
+	}
+	return nativeTestProxyWithAuthorizer(t, route, func(context.Context, http.Header) bool { return true })
+}
+
+func nativeTestProxyWithAuthorizer(t *testing.T, reviewRoute string, authorize localAuthorizer) *goproxy.ProxyHttpServer {
+	t.Helper()
 	ca, err := certs.LoadOrCreate(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	s, err := newWithAuthorizer("127.0.0.1:0", ca, nil, nil, func(purpose string) string {
-		if purpose == "review-route" && len(reviewRoute) > 0 {
-			return reviewRoute[0]
+		if purpose == "review-route" {
+			return reviewRoute
 		}
 		return ""
-	}, func(context.Context, http.Header) bool { return true })
+	}, authorize)
 	if err != nil {
 		t.Fatal(err)
 	}

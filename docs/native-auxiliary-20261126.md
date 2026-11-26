@@ -14,9 +14,15 @@ Cursor 3.32.4 on macOS arm64. The Windows desktop report at `a2a8c5b` is a separ
 
 The dashboard warns about Cursor usage when selecting Bugbot and the provider's
 token costs for BYOK review. Changing the setting does not reassign an existing
-Bidi session to the other billing destination. BYOK Review supports the client's
+Bidi session to the other billing destination; active native polls keep working
+after switching the default to BYOK. Review model choices use persistent adapter
+identities, so identical model names at different providers stay distinct through
+renaming, reordering and key rotation. A missing explicit selection fails rather
+than billing a different adapter. BYOK Review supports the client's
 SSE transport; unsupported direct/poll transports return an explicit error rather
-than silently sending the review to Cursor.
+than silently sending the review to Cursor. Native voice/review Bidi input does
+not depend on local account decryption; local inference and late local input
+still require the current Cursor account.
 
 ## Controlled desktop measurement
 
