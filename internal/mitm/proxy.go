@@ -66,6 +66,8 @@ func shouldMITMHost(host string) bool {
 	return isCursorAPI2Host(host)
 }
 
+type nativeReviewRequestKey struct{}
+
 type Server struct {
 	addr        string
 	srv         *http.Server
@@ -195,13 +197,20 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		if req.URL == nil {
 			return req, makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"invalid request URL"}`)
 		}
-		if isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
+		// Snapshot the billing choice once per request. Established Bidi inputs
+		// retain their original route in the registry even if settings change.
+		nativeReview := isCursorAPI2Host(req.URL.Host) && reviewPath(req.URL.Path) &&
+			selectedModel != nil && selectedModel("review-route") == "cursor"
+		if nativeReview {
+			*req = *req.WithContext(context.WithValue(req.Context(), nativeReviewRequestKey{}, true))
+		}
+		if !nativeReview && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
 			return req, makeJSONResp(req, http.StatusForbidden, `{"code":"permission_denied","message":"BYOK requests must originate from the Cursor desktop application"}`)
 		}
 		if debug {
 			log.Printf("[REQ] %s %s%s (CT: %s)", req.Method, req.URL.Host, req.URL.Path, req.Header.Get("Content-Type"))
 		}
-		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" && isCursorAPI2Host(req.URL.Host) && localProxyPath(req.URL.Path) {
+		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" && isCursorAPI2Host(req.URL.Host) && localProxyPath(req.URL.Path) && !nativeReview {
 			return req, &http.Response{
 				StatusCode: http.StatusNoContent,
 				Status:     "204 No Content",
@@ -224,16 +233,23 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 			if req.Method == http.MethodOptions {
 				return nativePassthroughRequest(req)
 			}
-			if paidLocalPath(path) && (authorize == nil || !authorize(req.Context(), req.Header)) {
+			if !nativeReview && paidLocalPath(path) && (authorize == nil || !authorize(req.Context(), req.Header)) {
 				return req, makeJSONResp(req, http.StatusUnauthorized, `{"code":"unauthenticated","message":"Local inference requires the current Cursor account."}`)
 			}
-			if unsupportedLocalBidiPoll(path) {
+			if !nativeReview && unsupportedLocalBidiPoll(path) {
 				return req, makeJSONResp(req, http.StatusNotImplemented, `{"code":"unimplemented","message":"Local BYOK polling is not supported; use WebSocket or SSE"}`)
 			}
 			if path == "/aiserver.v1.BidiService/BidiAppend" {
 				return bidiRoutes.append(req)
 			}
+			if nativeReview && path == "/aiserver.v1.AiService/StreamBugBotAgentic" {
+				return nativePassthroughRequest(req)
+			}
 			poll, native := nativeBidiStreams[path]
+			if nativeReview {
+				native = true
+				poll = strings.HasSuffix(path, "Poll")
+			}
 			if localBidiStream(path) || native {
 				mode := "local"
 				if native {
@@ -277,24 +293,18 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 			if path == "/aiserver.v1.InferenceService/RunInferenceSSE" {
 				return req, handleInferenceSSE(req, serverCtx, resolver)
 			}
-			if path == "/aiserver.v1.CppService/AvailableModels" {
-				return req, handleAvailableCppModels(req, resolver)
+			if path == "/aiserver.v1.AiService/StreamBugBotAgenticSSE" {
+				model := ""
+				if selectedModel != nil {
+					model = selectedModel("review")
+				}
+				return req, handleBugBotRunSSE(req, serverCtx, resolver, model)
 			}
-			if path == "/aiserver.v1.AiService/CppConfig" {
-				return req, handleCppConfig(req, resolver)
+			if path == "/aiserver.v1.AiService/StreamBugBotAgentic" {
+				return req, makeJSONResp(req, http.StatusNotImplemented, `{"code":"unimplemented","message":"BYOK Agent Review requires the SSE transport; native billing fallback is disabled"}`)
 			}
-			if path == "/aiserver.v1.AiService/StreamCpp" {
-				return req, handleStreamCpp(req, serverCtx, resolver, selectedModel("tab"))
-			}
-			if path == "/aiserver.v1.AiService/NameTab" {
-				return req, handleNativeText(req, resolver, "")
-			}
-			if path == "/aiserver.v1.AiService/WriteGitBranchName" {
-				return req, handleNativeText(req, resolver, selectedModel("commit"))
-			}
-			// Commit messages and Agent Review use Cursor's native services.
-			// Fix All Issues submits a normal chat prompt, so its Agent/Inference
-			// request still follows the BYOK routes above.
+			// Titles, branch names, Tab and commit messages use Cursor services.
+			// Agent Review and Fix All Issues remain on the BYOK routes above.
 			return nativePassthroughRequest(req)
 		}
 		return req, nil
@@ -317,7 +327,7 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		if gw != nil {
 			gw.MaybeRewriteResponse(req, resp)
 		}
-		if req != nil && req.URL != nil && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) {
+		if req != nil && req.URL != nil && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && req.Context().Value(nativeReviewRequestKey{}) != true {
 			applyNativeCORS(req, resp)
 		}
 		return resp

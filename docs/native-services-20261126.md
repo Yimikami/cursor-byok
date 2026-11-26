@@ -5,13 +5,21 @@ Cursor 3.32.4, macOS arm64. These checks follow the Windows acceptance at
 The routing changes described here were made afterward; the Windows desktop
 report must not be presented as a test of this later commit.
 
-## Routing decision
+## Historical routing decision
 
-Agent Review and SCM commit-message generation stay on Cursor's native service.
+**Current behavior:** Agent Review now defaults to BYOK, with an explicit
+dashboard option for Cursor Bugbot and its native usage/limits. The usage
+measurement and later routing update are recorded in
+[native-auxiliary-20261126.md](native-auxiliary-20261126.md). The native Review
+results below remain evidence of the optional Cursor route.
+
+At the time of these checks, Agent Review and SCM commit-message generation
+stayed on Cursor's native service.
 The review SSE/poll endpoints and their shared BidiAppend input are forwarded
 with genuine native credentials. Fix All Issues prepares a normal chat prompt,
-so its coding run still uses the selected BYOK model. Chat titles and branch
-names retain their existing BYOK routing.
+so its coding run still uses the selected BYOK model. A later routing update also leaves chat titles, branch names and Tab native;
+see [native-auxiliary-20261126.md](native-auxiliary-20261126.md). The desktop
+results below predate that additional update.
 
 ## Observed desktop results
 

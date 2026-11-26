@@ -24,13 +24,18 @@ var legacyLocalTokenFixture = func() string {
 	return header + "." + claims + ".fake-local-state-token"
 }()
 
-func nativeTestProxy(t *testing.T) *goproxy.ProxyHttpServer {
+func nativeTestProxy(t *testing.T, reviewRoute ...string) *goproxy.ProxyHttpServer {
 	t.Helper()
 	ca, err := certs.LoadOrCreate(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := newWithAuthorizer("127.0.0.1:0", ca, nil, nil, func(string) string { return "" }, func(context.Context, http.Header) bool { return true })
+	s, err := newWithAuthorizer("127.0.0.1:0", ca, nil, nil, func(purpose string) string {
+		if purpose == "review-route" && len(reviewRoute) > 0 {
+			return reviewRoute[0]
+		}
+		return ""
+	}, func(context.Context, http.Header) bool { return true })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +50,6 @@ func TestNativeRequestsPreserveOfficialAccountAndPayload(t *testing.T) {
 		name, method, path, contentType, body, response string
 	}{
 		{"native commit generation", "POST", "/aiserver.v1.AiService/WriteGitCommitMessage", "application/proto", "\x0a\x05+diff", "\x0a\x03fix"},
-		{"native agent review", "POST", "/aiserver.v1.AiService/StreamBugBotAgentic", "application/connect+proto", "\x0a\x06review", "\x0a\x04done"},
 		{"plugin marketplace", "POST", "/aiserver.v1.DashboardService/ListMarketplacePlugins", "application/proto", "\x08\x01", "\x0a\x04list"},
 		{"account profile", "POST", "/aiserver.v1.DashboardService/GetMe", "application/proto", "\x08\x01", "\x0a\x04real"},
 		{"real membership", "GET", "/auth/full_stripe_profile", "", "", `{"membershipType":"free"}`},

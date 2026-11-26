@@ -217,10 +217,10 @@ func TestNativeBidiReplayThroughProxy(t *testing.T) {
 		{"/aiserver.v1.AiService/StreamBugBotAgenticPoll", true},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
-			if localBidiStream(tc.path) || unsupportedLocalBidiPoll(tc.path) || paidLocalPath(tc.path) {
+			if !reviewPath(tc.path) && (localBidiStream(tc.path) || unsupportedLocalBidiPoll(tc.path) || paidLocalPath(tc.path)) {
 				t.Fatal("native stream classified as local BYOK")
 			}
-			p := nativeTestProxy(t)
+			p := nativeTestProxy(t, "cursor")
 			var mu sync.Mutex
 			var paths []string
 			var bodies [][]byte
@@ -307,7 +307,7 @@ func TestLocalBidiPollFailsWithoutNativeForwarding(t *testing.T) {
 		})
 		return req, nil
 	})
-	for _, path := range []string{"/agent.v1.AgentService/RunPoll", "/aiserver.v1.InferenceService/RunInferencePoll"} {
+	for _, path := range []string{"/agent.v1.AgentService/RunPoll", "/aiserver.v1.InferenceService/RunInferencePoll", "/aiserver.v1.AiService/StreamBugBotAgenticPoll", "/aiserver.v1.AiService/StreamBugBotAgentic"} {
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, routeStreamRequest("unsupported-poll", path, true))
 		if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "unimplemented") {

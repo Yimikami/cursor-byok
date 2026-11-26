@@ -8,35 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"cursor-byok/internal/agent"
 )
-
-func TestNativeTextBodyLimitBeforeProvider(t *testing.T) {
-	for _, compressed := range []bool{false, true} {
-		body := bytes.Repeat([]byte("x"), (1<<20)+1)
-		if compressed {
-			var encoded bytes.Buffer
-			writer := gzip.NewWriter(&encoded)
-			_, _ = writer.Write(body)
-			_ = writer.Close()
-			body = encoded.Bytes()
-		}
-		req := httptest.NewRequest(http.MethodPost, "https://api2.cursor.sh/aiserver.v1.AiService/NameTab", bytes.NewReader(body))
-		if compressed {
-			req.Header.Set("Content-Encoding", "gzip")
-		}
-		req.ContentLength = -1 // Chunked requests must receive the same bound.
-		response := handleNativeText(req, func() []agent.AdapterTarget {
-			t.Fatal("oversized request reached provider resolution")
-			return nil
-		}, "")
-		_ = response.Body.Close()
-		if response.StatusCode != http.StatusRequestEntityTooLarge {
-			t.Fatalf("compressed=%t status=%d", compressed, response.StatusCode)
-		}
-	}
-}
 
 func TestDecodedBodyBoundsBothRepresentations(t *testing.T) {
 	for _, size := range []int{32, 33} {

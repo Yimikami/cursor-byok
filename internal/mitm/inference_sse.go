@@ -42,3 +42,9 @@ func handleInferenceSSE(req *http.Request, serverCtx context.Context, resolve ag
 		agent.HandleInferenceSSE(ctx, body, req.Header.Get("Content-Type"), w, resolve)
 	})
 }
+
+func handleBugBotRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver, selectedModel string) *http.Response {
+	return streamAgentResponse(req, serverCtx, agent.BugBotSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
+		agent.HandleBugBotRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver, selectedModel)
+	})
+}
