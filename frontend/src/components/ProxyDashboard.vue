@@ -218,12 +218,17 @@ const modelOptions = computed(() =>
   })),
 );
 
-const reviewModelOptions = computed(() =>
-  cfg.value.modelAdapters.filter(a => a.id && a.modelID).map(a => ({
+const reviewModelOptions = computed(() => {
+  const options = cfg.value.modelAdapters.filter(a => a.id && a.modelID).map((a, i) => ({
     value: `adapter:${a.id}`,
-    label: `${a.displayName || a.modelID} (${a.modelID})`,
-  })),
-);
+    label: `${a.displayName || a.modelID} (${a.modelID}) — ${shortHost(a.baseURL)} · Adapter ${i + 1}`,
+  }));
+  const selected = cfg.value.reviewModelID;
+  if (selected && !options.some(a => a.value === selected)) {
+    options.unshift({value: selected, label: "Selected adapter unavailable — choose another model"});
+  }
+  return options;
+});
 
 const shortFP = computed(() =>
   state.value.caFingerprint
@@ -511,9 +516,11 @@ async function removeAdapter(i: number) {
   if (removed && cfg.value.commitModelID === removed.modelID) {
     cfg.value.commitModelID = "";
   }
-  if (removed && (cfg.value.reviewModelID === removed.modelID || cfg.value.reviewModelID === `adapter:${removed.id}`)) {
-    cfg.value.reviewModelID = "";
+  if (removed && cfg.value.reviewModelID === removed.modelID) {
+    cfg.value.reviewModelID = `adapter:${removed.id || 'removed'}`;
   }
+  // Retain an explicit deleted review choice so the next review fails visibly
+  // until the user chooses a replacement, instead of billing another account.
   await persistConfig();
 }
 

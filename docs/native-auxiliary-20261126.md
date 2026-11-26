@@ -18,7 +18,7 @@ Bidi session to the other billing destination; active native polls keep working
 after switching the default to BYOK. Review model choices use persistent adapter
 identities, so identical model names at different providers stay distinct through
 renaming, reordering and key rotation. A missing explicit selection fails rather
-than billing a different adapter. BYOK Review supports the client's
+than billing a different adapter, including after deletion from the dashboard. BYOK Review supports the client's
 SSE transport; unsupported direct/poll transports return an explicit error rather
 than silently sending the review to Cursor. Native voice/review Bidi input does
 not depend on local account decryption; local inference and late local input

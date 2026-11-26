@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,10 @@ import (
 )
 
 const bidiRouteLimit = 64 << 20
+const bidiStagingLimit = 32 << 20
+const bidiStagingEntries = 64
+
+var errBidiCapacity = errors.New("bidi request capacity exceeded")
 
 // These shared-Bidi mappings come from Cursor 3.32.4's BidiTransport factory.
 // All other native RPCs retain their ordinary passthrough behavior.
@@ -95,24 +100,65 @@ func (r *bidiRouteRegistry) close() {
 	r.queuedBytes = 0
 }
 
-func (r *bidiRouteRegistry) entryLocked(req *http.Request, id string) (*bidiRoute, error) {
+func (r *bidiRouteRegistry) dropEntryLocked(key string) {
+	for _, p := range r.entries[key].pending {
+		r.queuedBytes -= len(p.body)
+	}
+	delete(r.entries, key)
+}
+
+func (r *bidiRouteRegistry) stagingUsageLocked() (count, size int) {
+	for _, entry := range r.entries {
+		if entry.mode == "" {
+			count++
+			for _, p := range entry.pending {
+				size += len(p.body)
+			}
+		}
+	}
+	return
+}
+
+// Unclaimed input must never reserve the capacity needed to claim a stream.
+// Evict only staging entries; established routes and their replay are retained.
+func (r *bidiRouteRegistry) evictStagingLocked() bool {
+	oldestKey := ""
+	var oldest time.Time
+	for key, entry := range r.entries {
+		if entry.mode == "" && entry.active == 0 && (oldestKey == "" || entry.touched.Before(oldest)) {
+			oldestKey, oldest = key, entry.touched
+		}
+	}
+	if oldestKey == "" {
+		return false
+	}
+	r.dropEntryLocked(oldestKey)
+	return true
+}
+
+func (r *bidiRouteRegistry) entryLocked(req *http.Request, id string, claiming bool) (*bidiRoute, error) {
 	if r.closed {
 		return nil, fmt.Errorf("proxy is stopping")
 	}
 	now := time.Now()
 	for key, entry := range r.entries {
 		if entry.active == 0 && now.Sub(entry.touched) > 2*time.Minute {
-			for _, p := range entry.pending {
-				r.queuedBytes -= len(p.body)
-			}
-			delete(r.entries, key)
+			r.dropEntryLocked(key)
 		}
 	}
 	key := bidiRouteKey(req, id)
 	entry := r.entries[key]
 	if entry == nil {
+		if !claiming {
+			count, _ := r.stagingUsageLocked()
+			if count >= bidiStagingEntries {
+				return nil, errBidiCapacity
+			}
+		} else if len(r.entries) >= 256 {
+			r.evictStagingLocked()
+		}
 		if len(r.entries) >= 256 {
-			return nil, fmt.Errorf("too many bidi requests")
+			return nil, errBidiCapacity
 		}
 		entry = &bidiRoute{credential: bidiCredential(req), pending: make(map[int64]queuedBidiRequest), replayGate: make(chan struct{}, 1)}
 		r.entries[key] = entry
@@ -195,6 +241,14 @@ func (r *bidiRouteRegistry) existingMode(req *http.Request, poll bool) (string, 
 	return entry.mode, nil
 }
 
+func bidiEntryError(req *http.Request, err error) *http.Response {
+	status := http.StatusBadRequest
+	if errors.Is(err, errBidiCapacity) {
+		status = http.StatusTooManyRequests
+	}
+	return bidiRouteError(req, status, err.Error())
+}
+
 func bidiRouteError(req *http.Request, status int, message string) *http.Response {
 	code := "invalid_argument"
 	if status == 429 {
@@ -232,10 +286,10 @@ func (r *bidiRouteRegistry) append(req *http.Request, authorizers ...localAuthor
 	}
 	r.mu.Lock()
 	previousEntry := r.entries[bidiRouteKey(req, id)]
-	entry, err := r.entryLocked(req, id)
+	entry, err := r.entryLocked(req, id, false)
 	if err != nil {
 		r.mu.Unlock()
-		return req, bidiRouteError(req, 400, err.Error())
+		return req, bidiEntryError(req, err)
 	}
 	mode := entry.mode
 	if mode == "local" && len(authorizers) > 0 {
@@ -254,7 +308,15 @@ func (r *bidiRouteRegistry) append(req *http.Request, authorizers ...localAuthor
 	if !entry.ready {
 		mode = "" // Keep new appends behind any pending/retrying replay.
 		if _, exists := entry.pending[seq]; !exists {
-			if len(entry.pending) >= 128 || r.queuedBytes+len(raw) > bidiRouteLimit {
+			stagingFull := false
+			if entry.mode == "" {
+				_, size := r.stagingUsageLocked()
+				stagingFull = size+len(raw) > bidiStagingLimit
+			} else if len(entry.pending) < 128 && len(raw) <= bidiRouteLimit {
+				for r.queuedBytes+len(raw) > bidiRouteLimit && r.evictStagingLocked() {
+				}
+			}
+			if len(entry.pending) >= 128 || stagingFull || r.queuedBytes+len(raw) > bidiRouteLimit {
 				if entry != previousEntry {
 					delete(r.entries, bidiRouteKey(req, id))
 				}
@@ -310,10 +372,10 @@ func (r *bidiRouteRegistry) claim(req *http.Request, mode string, poll bool, ser
 		return req, bidiRouteError(req, 400, err.Error()), nil
 	}
 	r.mu.Lock()
-	entry, err := r.entryLocked(req, id)
+	entry, err := r.entryLocked(req, id, true)
 	if err != nil {
 		r.mu.Unlock()
-		return req, bidiRouteError(req, 400, err.Error()), nil
+		return req, bidiEntryError(req, err), nil
 	}
 	if entry.mode != "" && entry.mode != mode {
 		r.mu.Unlock()
