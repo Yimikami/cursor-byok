@@ -296,6 +296,7 @@ export class UserConfig {
     "activeModelID"?: string;
     "commitModelID"?: string;
     "reviewModelID"?: string;
+    "reviewRoute"?: string;
 
     /**
      * CloseAction remembers what the user picked in the "Quit or minimize

@@ -19,8 +19,6 @@ const bidiRouteLimit = 64 << 20
 // These shared-Bidi mappings come from Cursor 3.32.4's BidiTransport factory.
 // All other native RPCs retain their ordinary passthrough behavior.
 var nativeBidiStreams = map[string]bool{
-	"/aiserver.v1.AiService/StreamBugBotAgenticSSE":                     false,
-	"/aiserver.v1.AiService/StreamBugBotAgenticPoll":                    true,
 	"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsSSE":            false,
 	"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsPoll":           true,
 	"/aiserver.v1.ChatService/StreamUnifiedChatWithToolsIdempotentSSE":  false,
@@ -33,12 +31,20 @@ var nativeBidiStreams = map[string]bool{
 	"/aiserver.v1.AiService/StreamUiBestOfNJudgePoll":                   true,
 }
 
+func reviewPath(path string) bool {
+	switch path {
+	case "/aiserver.v1.AiService/StreamBugBotAgentic", "/aiserver.v1.AiService/StreamBugBotAgenticSSE", "/aiserver.v1.AiService/StreamBugBotAgenticPoll":
+		return true
+	}
+	return false
+}
+
 func localBidiStream(path string) bool {
-	return path == "/agent.v1.AgentService/RunSSE" || path == "/aiserver.v1.InferenceService/RunInferenceSSE"
+	return path == "/agent.v1.AgentService/RunSSE" || path == "/aiserver.v1.InferenceService/RunInferenceSSE" || path == "/aiserver.v1.AiService/StreamBugBotAgenticSSE"
 }
 
 func unsupportedLocalBidiPoll(path string) bool {
-	return path == "/agent.v1.AgentService/RunPoll" || path == "/aiserver.v1.InferenceService/RunInferencePoll"
+	return path == "/agent.v1.AgentService/RunPoll" || path == "/aiserver.v1.InferenceService/RunInferencePoll" || path == "/aiserver.v1.AiService/StreamBugBotAgenticPoll"
 }
 
 func localProxyPath(path string) bool {
@@ -46,9 +52,7 @@ func localProxyPath(path string) bool {
 		return true
 	}
 	switch path {
-	case "/aiserver.v1.AiService/CppConfig", "/aiserver.v1.AiService/StreamCpp", "/aiserver.v1.CppService/AvailableModels":
-		return true
-	case "/aiserver.v1.AiService/GetDefaultModel", "/agent/v1/run", "/aiserver.v1.AiService/AvailableModels", "/aiserver.v1.AiService/GetDefaultModelNudgeData", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName":
+	case "/aiserver.v1.AiService/StreamBugBotAgentic", "/aiserver.v1.AiService/GetDefaultModel", "/agent/v1/run", "/aiserver.v1.AiService/AvailableModels", "/aiserver.v1.AiService/GetDefaultModelNudgeData":
 		return true
 	}
 	return false

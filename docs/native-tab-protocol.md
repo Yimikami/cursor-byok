@@ -1,4 +1,11 @@
-# Native Tab completion contract
+# Historical BYOK Tab completion contract
+
+**Routing update, 2026-11-26:** Tab configuration, available models and streaming
+suggestions now stay on Cursor's native services. The local HTTP adapters below
+were removed. This document retains the previous provider implementation's
+protocol evidence; it is not the current production routing contract. Native
+failure never triggers a BYOK provider fallback. See
+[native-auxiliary-20261126.md](native-auxiliary-20261126.md).
 
 Windows Cursor 3.31.15, inspected 2026-11-25; pure text-consumer check repeated
 against the installed 3.32.4 update on 2026-11-26. This is source/fixture validation;

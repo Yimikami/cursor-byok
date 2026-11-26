@@ -65,6 +65,10 @@ Multitask-mode completion.
 
 ## Commit generation, branch names and chat titles
 
+Routing update (2026-11-26): these three features now stay native. The provider
+measurements below describe the earlier implementation, not the current routes.
+See [native-auxiliary-20261126.md](native-auxiliary-20261126.md).
+
 Native protobuf requests were sent through the running TLS proxy to the real
 configured provider, using only a scratch repository diff:
 

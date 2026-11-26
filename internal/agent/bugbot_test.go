@@ -75,3 +75,25 @@ func TestBugBotRejectsTokenLimitedReviewEvenWithValidJSON(t *testing.T) {
 		}
 	}
 }
+
+func TestBugBotKeepsFindingsWithQualitativeConfidence(t *testing.T) {
+	for _, confidence := range []string{`"high"`, `"medium"`, `"low"`, `" HIGH "`, `null`} {
+		answer := `[{"title":"Wrong subtotal","description":"subtotal subtracts quantity instead of multiplying","file":"pricing.py","start_line":11,"end_line":11,"severity":"critical","confidence":` + confidence + `}]`
+		bugs, _, err := parseBugBotResponse(answer)
+		if err != nil || len(bugs) != 1 || bugs[0].GetLocations()[0].GetStartLine() != 11 {
+			t.Fatalf("valid finding discarded for confidence %s: %v %v", confidence, bugs, err)
+		}
+		if bugs[0].Confidence != nil {
+			t.Fatalf("invented numeric confidence for %s: %v", confidence, bugs[0].GetConfidence())
+		}
+	}
+	bugs, _, err := parseBugBotResponse(`[{"description":"Wrong subtotal","confidence":0.85}]`)
+	if err != nil || len(bugs) != 1 || bugs[0].GetConfidence() != 0.85 {
+		t.Fatalf("numeric confidence lost: %v %v", bugs, err)
+	}
+	for _, confidence := range []string{`true`, `2`, `-0.1`, `"unknown"`, `{}`} {
+		if _, _, err := parseBugBotResponse(`[{"description":"Wrong subtotal","confidence":` + confidence + `}]`); err == nil {
+			t.Fatalf("invalid confidence %s accepted", confidence)
+		}
+	}
+}

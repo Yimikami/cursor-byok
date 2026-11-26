@@ -25,7 +25,7 @@ failure, wire contract, implementation and distinct transport-test evidence.
 | Debug context | `log_path`, `server_endpoint` and the installed client's `session_id` field 3 reach the provider in Debug mode. Wire-field regression test verifies session ID is retained. | Instrument a sample program, reproduce, consume Cursor's actual debug log. |
 | MCP definitions | Rich definitions, request-context tools and filesystem descriptor definitions become distinct provider functions. Native Plan actions and run-level filesystem fallback are covered, including real schema properties and stale-map removal. | Invoke a connected MCP server, handle permissions/errors, verify its output in Cursor. |
 | Workspace context | Rules, selected files/selections, terminals, project tree and image data have translation paths. Missing `env` no longer discards separately supplied context. StartPlan selected files are regression-tested. | Native attachments and provider-specific multimodal support. |
-| Commit generation | `WriteGitCommitMessage` has a provider-backed handler in `bugbot.go`; this inventory did not execute that RPC. | Separate handler/live test and SCM input rendering. |
+| Commit generation | `WriteGitCommitMessage` stays native after successful proxy-off desktop tests. The older provider helper remains in `bugbot.go` for direct unit tests, but has no production proxy route or configuration switch that enables it. | BYOK-on macOS result is in the follow-up below; repeat the changed native route on Windows. |
 | Concurrent conversations | Separate session-isolation work adds scoped wait/result ownership. This inventory does not claim subagent or cloud-worker support from that. | Two simultaneous native chats and cancellation. |
 
 `native_context_test.go` supplies the tests named above. Existing TLS WebSocket
@@ -60,14 +60,17 @@ the bridge does not infer that every MCP tool is read-only or mutating.
   tools through the generic adapter. Schema transport still does not establish
   that each client tool or its hosted service works; see the separate desktop
   results in [native-feature-validation.md](native-feature-validation.md).
-- Tab's active `CppService/AvailableModels`, `CppConfig` and `StreamCpp`
-  paths now have provider-backed single-edit support and TLS/client-consumer
-  fixture tests. See [native-tab-protocol.md](native-tab-protocol.md) for its
-  native latency limit and remaining live acceptance work.
-- NameTab and WriteGitBranchName now have provider-backed unary handlers and
-  real TLS transport tests, including invalid output handling. UI acceptance
-  remains separate. Commit generation and Agent Review now stay native after
-  successful proxy-off desktop tests. Fix All Issues stays in BYOK chat.
+- Tab's `CppService/AvailableModels`, `CppConfig`, and `StreamCpp`, together
+  with `NameTab` and `WriteGitBranchName`, now pass through to Cursor. Verified
+  two-hop TLS fixtures cover success, account rejection, quota and server errors
+  with zero BYOK provider calls. The previous provider implementations are
+  historical and no longer have a production HTTP route. Native entitlement and
+  actual desktop results remain separate from the transport tests.
+- Commit generation stays native after successful proxy-off and BYOK-on macOS
+  desktop tests. Agent Review defaults to BYOK; the dashboard offers explicit
+  Cursor Bugbot opt-in with a native usage warning. See the current results in
+  [native-auxiliary-20261126.md](native-auxiliary-20261126.md). Fix All Issues
+  stays in BYOK chat.
 - Ancillary Cursor RPCs, including historical inline-edit endpoints, now pass
   through with genuine native credentials instead of a blanket local 404.
   Current client callsites and the inline-edit UI still need live verification;
@@ -111,5 +114,8 @@ the repository; no user credentials or Cursor account database were inspected.
 
 See [native-services-20261126.md](native-services-20261126.md) for proxy-off and
 BYOK-on Agent Review/commit generation, Task Models, marketplace and voice results.
-See [windows-native-20261126.md](windows-native-20261126.md) for the final Windows
+See [windows-native-20261126.md](windows-native-20261126.md) for Windows
 acceptance at `a2a8c5b`, including same-chat model switching and its limitations.
+That run predates the native review/commit/title/branch/Tab routing changes. Windows desktop
+results for those changed routes are not claimed by that earlier report;
+three-platform automated CI and macOS desktop results are recorded separately.

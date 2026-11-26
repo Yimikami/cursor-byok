@@ -11,7 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Keep Agent Review and commit messages on Cursor's native services, including review SSE/poll input routing. Fix All Issues continues through BYOK chat.
+- Make Agent Review use BYOK by default, with a dashboard choice for Cursor Bugbot that explains native usage and limits. Never silently fall back between billing providers. Fix All Issues continues through BYOK chat.
+- Keep chat titles, branch names, Tab and commit messages on Cursor's native services. Preserve native authentication, errors and quotas without extra BYOK generation calls.
+- Accept qualitative confidence labels in otherwise valid BYOK review reports without inventing numeric scores; request explicit numeric confidence and reject malformed/truncated results.
+- Isolate adapter editor drafts from saved settings during Save and Test, so editing and canceling while a probe runs cannot leak canceled changes into a later save.
 
 - Publish configuration changes as complete private snapshots and serialize readers/writers; prevent a delayed adapter probe from overwriting newer settings.
 - Restore the native model selector for configured BYOK adapters on macOS and Windows using Cursor's own-key mode and named-model view, with exact preference restoration and protection for disabled saved native keys.
@@ -28,11 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore inherited CONNECT proxy settings to prevent self-proxy loops; preserve Connect framing and trailers in rewritten model responses.
 - Keep native tool approvals pending until Cursor responds or the run is canceled, instead of manufacturing incomplete results after 30 seconds.
 - Recognize Windows safeStorage-wrapped legacy temporary sessions in memory and retain recovery data when ownership cannot be established.
-- Support native Tab single-line predictions with bounded latency and disable incompatible thinking budgets for short completions.
 - Support Cursor 3.32.4 local-loop inference over WebSocket and SSE, including native tool schemas, streamed tool calls, cancellation and provider errors.
 - Preserve real Cursor sign-in and forward native account, update and extension requests with verified TLS; remove synthetic account creation and blanket auxiliary 404 responses.
 - Preserve JSONC comments and unrelated edits, scope legacy tool results to their owning run, and stop allocating buffers for late shell events.
-- Generate native chat titles and Git branch names through the selected BYOK provider; reject empty or truncated generated names.
 - Keep the selected BYOK model when Cursor refreshes defaults, and supply the per-mode tool metadata required by current Plan/Ask/Debug/Multitask clients.
 - Restore Cursor's previous model preferences on Stop, failed startup, and crash recovery. Validate account backups and restore account keys transactionally.
 - Prevent an HTTP/2 connection preface from crashing the proxy during current Cursor startup; retain HTTP/1.1 WebSocket compatibility and route HTTP/2-only native streams through the same handlers, preserving gRPC trailers.
@@ -49,8 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Validation and limits
 
 - Real macOS Cursor 3.32.4 checks cover the native model picker, same-chat Letum → Claude Sonnet 4.6 → Letum switching, file/terminal tools, MCP, skills, Ask/Plan/Debug/Multitask, commit generation, Cmd-K and Tab. See [the native test report](docs/macos-native-20261126.md).
-- Windows Cursor 3.32.4 passed the seven requested native acceptance checks at `a2a8c5b`, including the picker, same-chat model switching, Plan/Build, Tab, MCP/skills/modes, dashboard save races and restoration. See [the Windows report](docs/windows-native-20261126.md); it predates the final native-review routing change.
-- The final native-routing change passed macOS Agent Review and commit generation with BYOK on; Task Models selection, marketplace access and user-driven voice coding also passed. See [the native-service follow-up](docs/native-services-20261126.md). Hosted XSearch and image generation failed upstream in the tested account; conditional cloud/indexing/video features are not certified.
+- Windows Cursor 3.32.4 passed the seven requested native acceptance checks at `a2a8c5b`, including the picker, same-chat model switching, Plan/Build, Tab, MCP/skills/modes, dashboard save races and restoration. See [the Windows report](docs/windows-native-20261126.md); it predates the later review choice and native title/branch/Tab routing changes. The later routing behavior is covered separately by macOS desktop and automated transport checks.
+- macOS native Agent Review and commit generation passed with BYOK on; Task Models selection, marketplace access and user-driven voice coding also passed. See [the native-service follow-up](docs/native-services-20261126.md). Hosted XSearch and image generation failed upstream in the tested account; conditional cloud/indexing/video features are not certified.
 - Quit Cursor before starting or stopping the proxy so its preference cache cannot overwrite restored settings. A saved, disabled native OpenAI key prevents automatic own-key mode activation.
 
 ## [1.0.2] - 2026-07-26

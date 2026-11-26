@@ -4,7 +4,7 @@ import { ProxyService } from "../../bindings/cursor-byok/internal/bridge";
 import { Window, Events, Browser, System } from "@wailsio/runtime";
 import OpenAIMark from "./logos/OpenAIMark.vue";
 import AnthropicMark from "./logos/AnthropicMark.vue";
-import { captureAdapterProbe, applyAdapterProbeResult, type ModelAdapter } from "../adapterProbe";
+import { adapterProbeFingerprint, captureAdapterProbe, applyAdapterProbeResult, type ModelAdapter } from "../adapterProbe";
 
 import { version as APP_VERSION } from "../../package.json";
 const GITHUB_REPO = "Yimikami/cursor-byok";
@@ -50,6 +50,7 @@ type UserConfig = {
   activeModelID?: string;
   commitModelID?: string;
   reviewModelID?: string;
+  reviewRoute?: string;
 };
 
 type CursorTweaks = {
@@ -230,6 +231,7 @@ async function refresh() {
   const c = (await ProxyService.LoadUserConfig()) as UserConfig;
   if (!c.modelAdapters) c.modelAdapters = [];
   if (!c.activeModelID) c.activeModelID = "";
+  if (c.reviewRoute !== "cursor") c.reviewRoute = "byok";
   if (!c.commitModelID) c.commitModelID = "";
   if (!c.reviewModelID) c.reviewModelID = "";
   cfg.value = c;
@@ -426,11 +428,13 @@ async function saveEditor(runTest = false) {
   }
 
   editorModel.value.type = editorProvider.value;
+  // Keep the editable draft separate from the snapshot saved and probed.
+  const savedModel: ModelAdapter = JSON.parse(JSON.stringify(editorModel.value));
   if (editorIndex.value === -1) {
-    cfg.value.modelAdapters.push(editorModel.value);
+    cfg.value.modelAdapters.push(savedModel);
     editorIndex.value = cfg.value.modelAdapters.length - 1;
   } else {
-    cfg.value.modelAdapters[editorIndex.value] = editorModel.value;
+    cfg.value.modelAdapters[editorIndex.value] = savedModel;
   }
   const index = editorIndex.value;
   const savedEditor = editorModel.value;
@@ -442,11 +446,13 @@ async function saveEditor(runTest = false) {
       const updated = (await ProxyService.TestAdapter(index)) as ModelAdapter;
       const applied = applyAdapterProbeResult(cfg.value.modelAdapters[index], probe, updated);
       if (applied && editorIndex.value === index && editorModel.value === savedEditor
+        && adapterProbeFingerprint(savedEditor) === probe.fingerprint
         && currentView.value === "editor") currentView.value = "models";
     } finally {
       editorTestRunning.value = false;
     }
-  } else if (editorIndex.value === index && editorModel.value === savedEditor) {
+  } else if (editorIndex.value === index && editorModel.value === savedEditor
+    && adapterProbeFingerprint(savedEditor) === probe.fingerprint) {
     currentView.value = "models";
   }
 }
@@ -769,17 +775,37 @@ onBeforeUnmount(() => {
         <div class="hr" />
         <div class="row">
           <div class="row-text">
-            <div class="row-title">Specialized model routing</div>
+            <div class="row-title">Cursor native features</div>
             <div class="row-desc">
-              Choose a dedicated model for branch names. Agent Review and commit
-              messages use Cursor's native services; Fix All Issues uses your chat model.
+              Chat titles, branch names, Tab suggestions and commit messages use your Cursor
+              account. Fix All Issues uses your BYOK chat model.
+            </div>
+          </div>
+        </div>
+        <div class="hr" />
+        <div class="row">
+          <div class="row-text">
+            <div class="row-title">Agent Review</div>
+            <div class="row-desc" v-if="cfg.reviewRoute === 'cursor'">
+              Cursor Bugbot uses your Cursor account's included usage and limits.
+              Additional charges depend on your Cursor billing settings.
+            </div>
+            <div class="row-desc" v-else>
+              Uses your BYOK provider's tokens and pricing. No automatic fallback to Cursor Bugbot.
             </div>
             <div class="special-model-grid">
               <label class="special-model-field">
-                <span>Branch name generator</span>
-                <select v-model="cfg.commitModelID" @change="persistConfig">
-                  <option value="">Default model</option>
-                  <option v-for="opt in modelOptions" :key="`commit-${opt.value}`" :value="opt.value">
+                <span>Review service</span>
+                <select v-model="cfg.reviewRoute" @change="persistConfig">
+                  <option value="byok">My BYOK models</option>
+                  <option value="cursor">Cursor Bugbot — uses Cursor usage</option>
+                </select>
+              </label>
+              <label v-if="cfg.reviewRoute !== 'cursor'" class="special-model-field">
+                <span>Code review model</span>
+                <select v-model="cfg.reviewModelID" @change="persistConfig">
+                  <option value="">Default BYOK model</option>
+                  <option v-for="opt in modelOptions" :key="`review-${opt.value}`" :value="opt.value">
                     {{ opt.label }}
                   </option>
                 </select>

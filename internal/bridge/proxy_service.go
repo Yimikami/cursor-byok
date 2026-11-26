@@ -103,6 +103,8 @@ func selectedModelFor(cfgDir string, purpose string) string {
 	switch purpose {
 	case "commit":
 		return strings.TrimSpace(c.CommitModelID)
+	case "review-route":
+		return strings.TrimSpace(c.ReviewRoute)
 	case "review":
 		return strings.TrimSpace(c.ReviewModelID)
 	default:
