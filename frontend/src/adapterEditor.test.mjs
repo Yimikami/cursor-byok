@@ -119,3 +119,11 @@ test('deleting an explicit review adapter keeps its selection unavailable', asyn
     assert.equal(f.writes.at(-1).reviewModelID, 'adapter:first-id');
   }
 });
+
+test('deleting a blank model leaves the default review selection unchanged', async () => {
+ const f = fixture();
+ f.cfg.value.modelAdapters[0].modelID = '';
+ f.cfg.value.reviewModelID = '';
+ await f.removeAdapter(0);
+ assert.equal(f.cfg.value.reviewModelID, '');
+});

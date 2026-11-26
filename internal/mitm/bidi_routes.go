@@ -16,7 +16,7 @@ import (
 )
 
 const bidiRouteLimit = 64 << 20
-const bidiStagingLimit = 32 << 20
+const bidiStagingLimit = bidiRouteLimit
 const bidiStagingEntries = 64
 
 var errBidiCapacity = errors.New("bidi request capacity exceeded")
@@ -119,23 +119,6 @@ func (r *bidiRouteRegistry) stagingUsageLocked() (count, size int) {
 	return
 }
 
-// Unclaimed input must never reserve the capacity needed to claim a stream.
-// Evict only staging entries; established routes and their replay are retained.
-func (r *bidiRouteRegistry) evictStagingLocked() bool {
-	oldestKey := ""
-	var oldest time.Time
-	for key, entry := range r.entries {
-		if entry.mode == "" && entry.active == 0 && (oldestKey == "" || entry.touched.Before(oldest)) {
-			oldestKey, oldest = key, entry.touched
-		}
-	}
-	if oldestKey == "" {
-		return false
-	}
-	r.dropEntryLocked(oldestKey)
-	return true
-}
-
 func (r *bidiRouteRegistry) entryLocked(req *http.Request, id string, claiming bool) (*bidiRoute, error) {
 	if r.closed {
 		return nil, fmt.Errorf("proxy is stopping")
@@ -148,23 +131,30 @@ func (r *bidiRouteRegistry) entryLocked(req *http.Request, id string, claiming b
 	}
 	key := bidiRouteKey(req, id)
 	entry := r.entries[key]
-	if entry == nil {
-		if !claiming {
-			count, _ := r.stagingUsageLocked()
-			if count >= bidiStagingEntries {
-				return nil, errBidiCapacity
+	if entry != nil && entry.credential != bidiCredential(req) {
+		return nil, fmt.Errorf("bidi stream credentials do not match")
+	}
+	stagingCount, stagingBytes := r.stagingUsageLocked()
+	claimedCount := len(r.entries) - stagingCount
+	// Keep separate capacity for staging and claimed streams. Never discard
+	// acknowledged input to admit another request. A promotion must fit in the
+	// claimed budget, or fail visibly while retaining its staged input for retry.
+	if claiming && (entry == nil || entry.mode == "") {
+		pendingBytes := 0
+		if entry != nil {
+			for _, p := range entry.pending {
+				pendingBytes += len(p.body)
 			}
-		} else if len(r.entries) >= 256 {
-			r.evictStagingLocked()
 		}
-		if len(r.entries) >= 256 {
+		if claimedCount >= 256 || r.queuedBytes-stagingBytes+pendingBytes > bidiRouteLimit {
 			return nil, errBidiCapacity
 		}
+	} else if entry == nil && stagingCount >= bidiStagingEntries {
+		return nil, errBidiCapacity
+	}
+	if entry == nil {
 		entry = &bidiRoute{credential: bidiCredential(req), pending: make(map[int64]queuedBidiRequest), replayGate: make(chan struct{}, 1)}
 		r.entries[key] = entry
-	}
-	if entry.credential != bidiCredential(req) {
-		return nil, fmt.Errorf("bidi stream credentials do not match")
 	}
 	entry.touched = now
 	return entry, nil
@@ -308,15 +298,12 @@ func (r *bidiRouteRegistry) append(req *http.Request, authorizers ...localAuthor
 	if !entry.ready {
 		mode = "" // Keep new appends behind any pending/retrying replay.
 		if _, exists := entry.pending[seq]; !exists {
-			stagingFull := false
-			if entry.mode == "" {
-				_, size := r.stagingUsageLocked()
-				stagingFull = size+len(raw) > bidiStagingLimit
-			} else if len(entry.pending) < 128 && len(raw) <= bidiRouteLimit {
-				for r.queuedBytes+len(raw) > bidiRouteLimit && r.evictStagingLocked() {
-				}
+			_, stagingBytes := r.stagingUsageLocked()
+			used, limit := stagingBytes, bidiStagingLimit
+			if entry.mode != "" {
+				used, limit = r.queuedBytes-stagingBytes, bidiRouteLimit
 			}
-			if len(entry.pending) >= 128 || stagingFull || r.queuedBytes+len(raw) > bidiRouteLimit {
+			if len(entry.pending) >= 128 || used+len(raw) > limit {
 				if entry != previousEntry {
 					delete(r.entries, bidiRouteKey(req, id))
 				}

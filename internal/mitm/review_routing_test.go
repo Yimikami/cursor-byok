@@ -137,10 +137,11 @@ func TestNativeReviewPollKeepsRouteAfterSettingChange(t *testing.T) {
 	}
 	defer s.Stop(context.Background())
 	p := s.srv.Handler.(*goproxy.ProxyHttpServer)
-	calls := 0
+	calls, preflightCalls := 0, 0
 	p.OnRequest().DoFunc(func(req *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 		ctx.RoundTripper = goproxy.RoundTripperFunc(func(r *http.Request, _ *goproxy.ProxyCtx) (*http.Response, error) {
 			if r.Method == http.MethodOptions {
+				preflightCalls++
 				return &http.Response{StatusCode: 204, Header: http.Header{"Access-Control-Allow-Origin": {cursorRendererOrigin}, "Access-Control-Allow-Methods": {"POST"}, "Access-Control-Allow-Headers": {"authorization,content-type"}}, Body: http.NoBody, Request: r}, nil
 			}
 			if r.Header.Get("Origin") != cursorRendererOrigin {
@@ -159,7 +160,7 @@ func TestNativeReviewPollKeepsRouteAfterSettingChange(t *testing.T) {
 		preflight.Header.Set("Access-Control-Request-Headers", "authorization,content-type")
 		preflightResult := httptest.NewRecorder()
 		p.ServeHTTP(preflightResult, preflight)
-		if preflightResult.Code != 204 || preflightResult.Header().Get("Access-Control-Allow-Origin") != cursorRendererOrigin || preflightResult.Header().Get("Access-Control-Allow-Headers") != "authorization,content-type" {
+		if preflightResult.Code != 204 || preflightResult.Header().Get("Access-Control-Allow-Origin") != cursorRendererOrigin || preflightResult.Header().Get("Access-Control-Allow-Headers") != "authorization,content-type" || preflightCalls != 1 {
 			t.Fatalf("preflight %d failed: %d", i, preflightResult.Code)
 		}
 		rec := httptest.NewRecorder()

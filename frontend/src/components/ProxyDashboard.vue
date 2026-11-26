@@ -516,7 +516,7 @@ async function removeAdapter(i: number) {
   if (removed && cfg.value.commitModelID === removed.modelID) {
     cfg.value.commitModelID = "";
   }
-  if (removed && cfg.value.reviewModelID === removed.modelID) {
+  if (removed && cfg.value.reviewModelID && cfg.value.reviewModelID === removed.modelID) {
     cfg.value.reviewModelID = `adapter:${removed.id || 'removed'}`;
   }
   // Retain an explicit deleted review choice so the next review fails visibly

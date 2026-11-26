@@ -22,7 +22,12 @@ than billing a different adapter, including after deletion from the dashboard. B
 SSE transport; unsupported direct/poll transports return an explicit error rather
 than silently sending the review to Cursor. Native voice/review Bidi input does
 not depend on local account decryption; local inference and late local input
-still require the current Cursor account.
+still require the current Cursor account. Unclaimed input is bounded to 64 entries
+and 64 MiB, independently of the 256 claimed streams and their 64 MiB replay
+budget. Capacity pressure returns 429 without evicting acknowledged data; an
+unsuccessful promotion retains staged input for retry. The per-request wire and
+decoded-body limit remains 64 MiB; the existing inner Bidi payload limit is
+32 MiB (hex encoding can make its envelope larger).
 
 ## Controlled desktop measurement
 
