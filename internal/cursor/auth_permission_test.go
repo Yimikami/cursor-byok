@@ -9,7 +9,7 @@ import (
 )
 
 func TestExplicitAuthPreparationRequestsPermissionOnceThenRetries(t *testing.T) {
-	for _, status := range []int32{-25293, -25308} {
+	for _, status := range []int32{-25293, -25308, -25315} {
 		for _, retryFails := range []bool{false, true} {
 			t.Run(fmt.Sprintf("status=%d/retry-fails=%v", status, retryFails), func(t *testing.T) {
 				var events []string
@@ -37,7 +37,7 @@ func TestExplicitAuthPreparationRequestsPermissionOnceThenRetries(t *testing.T) 
 }
 
 func TestAuthPermissionRetryExplainsPersistentAccessOnlyAfterGrant(t *testing.T) {
-	for _, status := range []int32{-25293, -25308} {
+	for _, status := range []int32{-25293, -25308, -25315} {
 		denied := &CursorKeychainAccessError{Status: status}
 		for _, grant := range []bool{false, true} {
 			err := prepareCursorAuthWithPermission(func() error { return denied }, func() error {

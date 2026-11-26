@@ -305,3 +305,13 @@ Anthropic stale-input replay and pattern/tuple schema defects were reproduced
 and fixed with targeted regressions. CodeRabbit's first green status was a
 rate-limit skip, not a completed review; follow-up review/CI is assessed before
 publishing.
+
+The first substantive CodeRabbit review (commit `38b3f11`) found three more
+issues. The delayed-probe dashboard overwrite is covered by asynchronous
+frontend regressions. Collection repair now refuses numbers that change on a
+JSON/float64/JSON round trip, keeping executed arguments and replayed history
+consistent. `errSecInteractionRequired` (-25315), confirmed in the installed
+Apple Security SDK, uses the same one-attempt explicit-Start permission flow.
+The latter two defects were reproduced before the fixes; agent, cursor and
+bridge race tests pass afterward. The final Windows desktop acceptance remains
+required before merge and release.

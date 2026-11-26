@@ -13,13 +13,36 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
+func TestNativeCollectionRepairDoesNotIntroduceNumberRounding(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{"ids": map[string]any{"type": "array"}}}
+	for _, collection := range []string{
+		`[9007199254740993]`, `[-9007199254740993]`, `[{"id":9007199254740993}]`,
+		`[1.0000000000000000001]`, `[1e400]`, `[1e-400]`, `[1e-999999999]`,
+	} {
+		args, _ := json.Marshal(map[string]string{"ids": collection})
+		if got := normalizeNativeArguments(string(args), schema); got != string(args) {
+			t.Errorf("unsafe collection repair: input=%s got=%s", args, got)
+		}
+	}
+	for _, collection := range []string{`[42]`, `[9007199254740992]`, `[0.1,1.25,-0,1.20e3]`} {
+		args, _ := json.Marshal(map[string]string{"ids": collection})
+		var got map[string]any
+		if err := json.Unmarshal([]byte(normalizeNativeArguments(string(args), schema)), &got); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := got["ids"].([]any); !ok {
+			t.Errorf("safe collection not repaired: %s", collection)
+		}
+	}
+}
+
 func TestNativeArgumentsDecodeOnlyExplicitCollections(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(`{"type":"object","properties":{"todos":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"meta":{"type":"object","properties":{"steps":{"type":"array","items":{"type":"integer"}}}}}}},"plan":{"type":"string"},"union":{"anyOf":[{"type":"string"},{"type":"array"}]},"nullable":{"type":["array","null"]},"constrained":{"type":"array","const":[]},"flag":{"type":"boolean"}}}`), &schema); err != nil {
 		t.Fatal(err)
 	}
 	args := `{"todos":"[{\"id\":\"[literal]\",\"meta\":\"{\\\"steps\\\":\\\"[9007199254740993]\\\"}\"}]","plan":"[1,2]","union":"[]","nullable":"[]","constrained":"[]","flag":"true","unknown":"{}"}`
-	want := `{"todos":[{"id":"[literal]","meta":{"steps":[9007199254740993]}}],"plan":"[1,2]","union":"[]","nullable":"[]","constrained":"[]","flag":"true","unknown":"{}"}`
+	want := `{"todos":[{"id":"[literal]","meta":{"steps":"[9007199254740993]"}}],"plan":"[1,2]","union":"[]","nullable":"[]","constrained":"[]","flag":"true","unknown":"{}"}`
 	got := normalizeNativeArguments(args, schema)
 	compact := func(raw string) any {
 		var value any

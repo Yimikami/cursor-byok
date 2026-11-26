@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"math/big"
+	"strconv"
 	"strings"
 )
 
@@ -59,7 +61,7 @@ func normalizeNativeArgumentValue(value any, schema map[string]any, depth int) (
 		if decoder.Decode(&decoded) == nil {
 			_, array := decoded.([]any)
 			_, object := decoded.(map[string]any)
-			if kind == "array" && array || kind == "object" && object {
+			if (kind == "array" && array || kind == "object" && object) && nativeCollectionNumbersRoundTrip(decoded, 0) {
 				value, changed = decoded, true
 			}
 		}
@@ -114,4 +116,51 @@ func normalizeNativeArgumentValue(value any, schema map[string]any, depth int) (
 		}
 	}
 	return value, changed
+}
+
+// The native structured tool response uses protobuf doubles. Do not turn a
+// string into a collection if JSON -> float64 -> JSON would change a number:
+// Cursor could execute a different ID than the one retained in provider history.
+func nativeCollectionNumbersRoundTrip(value any, depth int) bool {
+	if depth >= 64 {
+		return false
+	}
+	switch value := value.(type) {
+	case json.Number:
+		literal := value.String()
+		// Bound exact-decimal comparison work for adversarial number spellings.
+		if len(literal) > 1024 {
+			return false
+		}
+		if i := strings.IndexAny(literal, "eE"); i >= 0 {
+			exponent, err := strconv.ParseInt(literal[i+1:], 10, 32)
+			if err != nil || exponent < -1000 || exponent > 1000 {
+				return false
+			}
+		}
+		number, err := value.Float64()
+		if err != nil {
+			return false
+		}
+		encoded, err := json.Marshal(number)
+		if err != nil {
+			return false
+		}
+		original, ok := new(big.Rat).SetString(literal)
+		roundTrip, roundTripOK := new(big.Rat).SetString(string(encoded))
+		return ok && roundTripOK && original.Cmp(roundTrip) == 0
+	case map[string]any:
+		for _, child := range value {
+			if !nativeCollectionNumbersRoundTrip(child, depth+1) {
+				return false
+			}
+		}
+	case []any:
+		for _, child := range value {
+			if !nativeCollectionNumbersRoundTrip(child, depth+1) {
+				return false
+			}
+		}
+	}
+	return true
 }

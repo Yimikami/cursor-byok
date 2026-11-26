@@ -104,7 +104,7 @@ func (p *CursorKeychainPermissionAttempt) Run(prepare, requestAccess func() erro
 
 func cursorKeychainPermissionDenied(err error) bool {
 	var keychainErr *CursorKeychainAccessError
-	return errors.As(err, &keychainErr) && keychainErr != nil && (keychainErr.Status == -25293 || keychainErr.Status == -25308)
+	return errors.As(err, &keychainErr) && keychainErr != nil && (keychainErr.Status == -25293 || keychainErr.Status == -25308 || keychainErr.Status == -25315)
 }
 
 func cursorKeychainRetryError(err error) error {
