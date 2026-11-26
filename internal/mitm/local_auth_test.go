@@ -29,12 +29,10 @@ func TestProductionLocalRoutesRejectMissingAccount(t *testing.T) {
 	for _, path := range []string{
 		"/agent.v1.AgentService/RunSSE",
 		"/aiserver.v1.InferenceService/RunInferenceSSE",
-		"/aiserver.v1.AiService/StreamBugBotAgenticSSE",
 		"/aiserver.v1.AiService/StreamCpp",
 		"/aiserver.v1.BidiService/BidiAppend",
 		"/aiserver.v1.AiService/NameTab",
 		"/aiserver.v1.AiService/WriteGitBranchName",
-		"/aiserver.v1.AiService/WriteGitCommitMessage",
 	} {
 		for _, values := range [][]string{nil, {"Basic invalid"}, {"Bearer"}, {"Bearer one", "Bearer two"}} {
 			req := httptest.NewRequest(http.MethodPost, "https://api2.cursor.sh"+path, nil)
@@ -64,7 +62,7 @@ func TestPaidRoutesRequireOwnerBeforeReadingOrProvider(t *testing.T) {
 	}))
 	defer provider.Close()
 	_, client := testProxyWithAuthorizer(t, provider.URL, testOwnerAuthorization)
-	for _, path := range []string{"/aiserver.v1.AiService/StreamCpp", "/aiserver.v1.BidiService/BidiAppend", "/agent.v1.AgentService/RunSSE", "/aiserver.v1.InferenceService/RunInferenceSSE", "/aiserver.v1.AiService/StreamBugBotAgenticSSE", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName", "/aiserver.v1.AiService/WriteGitCommitMessage"} {
+	for _, path := range []string{"/aiserver.v1.AiService/StreamCpp", "/aiserver.v1.BidiService/BidiAppend", "/agent.v1.AgentService/RunSSE", "/aiserver.v1.InferenceService/RunInferenceSSE", "/aiserver.v1.AiService/NameTab", "/aiserver.v1.AiService/WriteGitBranchName"} {
 		for _, token := range []string{"", "Bearer other-account"} {
 			req, _ := http.NewRequest("POST", "https://api2.cursor.sh"+path, bytes.NewBufferString("not protobuf"))
 			if token != "" {

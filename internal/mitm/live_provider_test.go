@@ -82,20 +82,20 @@ func TestLiveProviderNativeProtocol(t *testing.T) {
 			t.Fatalf("probe: %v", err)
 		}
 	})
-	t.Run("commit-generation", func(t *testing.T) {
-		body, _ := proto.Marshal(&aiserverv1.WriteGitCommitMessageRequest{Diffs: []string{"diff --git a/add.go b/add.go\n--- a/add.go\n+++ b/add.go\n@@ -1 +1 @@\n-func add(a,b int) int { return a-b }\n+func add(a,b int) int { return a+b }"}})
-		resp, err := client.Post("https://api2.cursor.sh/aiserver.v1.AiService/WriteGitCommitMessage", "application/proto", bytes.NewReader(body))
+	t.Run("branch-generation", func(t *testing.T) {
+		body, _ := proto.Marshal(&aiserverv1.WriteGitBranchNameRequest{Diffs: "diff --git a/add.go b/add.go\n--- a/add.go\n+++ b/add.go\n@@ -1 +1 @@\n-func add(a,b int) int { return a-b }\n+func add(a,b int) int { return a+b }"})
+		resp, err := client.Post("https://api2.cursor.sh/aiserver.v1.AiService/WriteGitBranchName", "application/proto", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer resp.Body.Close()
 		raw, _ := io.ReadAll(resp.Body)
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("commit status %d", resp.StatusCode)
+			t.Fatalf("branch status %d", resp.StatusCode)
 		}
-		var out aiserverv1.WriteGitCommitMessageResponse
-		if err := proto.Unmarshal(raw, &out); err != nil || strings.TrimSpace(out.CommitMessage) == "" {
-			t.Fatalf("empty/invalid commit: %v", err)
+		var out aiserverv1.WriteGitBranchNameResponse
+		if err := proto.Unmarshal(raw, &out); err != nil || strings.TrimSpace(out.BranchName) == "" {
+			t.Fatalf("empty/invalid branch: %v", err)
 		}
 	})
 	t.Run("websocket-read-roundtrip", func(t *testing.T) {

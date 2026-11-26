@@ -16,7 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestNameTabUsesActiveProviderAndGitUsesCommitOverride(t *testing.T) {
+func TestNameTabUsesActiveProviderAndBranchUsesCommitOverride(t *testing.T) {
 	type providerRequest struct{ provider, body string }
 	requests := make(chan providerRequest, 3)
 	newProvider := func(name, text string) *httptest.Server {
@@ -58,7 +58,6 @@ func TestNameTabUsesActiveProviderAndGitUsesCommitOverride(t *testing.T) {
 		request                          proto.Message
 	}{
 		{"NameTab", "active", "private-chat-topic", &aiserverv1.NameTabRequest{Messages: []*aiserverv1.ConversationMessage{{Text: "private-chat-topic"}}}},
-		{"WriteGitCommitMessage", "commit", "git-change", &aiserverv1.WriteGitCommitMessageRequest{Diffs: []string{"+git-change"}}},
 		{"WriteGitBranchName", "commit", "git-change", &aiserverv1.WriteGitBranchNameRequest{Diffs: "+git-change"}},
 	} {
 		t.Run(tc.method, func(t *testing.T) {

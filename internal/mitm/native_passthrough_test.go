@@ -44,6 +44,9 @@ func TestNativeRequestsPreserveOfficialAccountAndPayload(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, path, contentType, body, response string
 	}{
+		{"native commit generation", "POST", "/aiserver.v1.AiService/WriteGitCommitMessage", "application/proto", "\x0a\x05+diff", "\x0a\x03fix"},
+		{"native agent review", "POST", "/aiserver.v1.AiService/StreamBugBotAgentic", "application/connect+proto", "\x0a\x06review", "\x0a\x04done"},
+		{"plugin marketplace", "POST", "/aiserver.v1.DashboardService/ListMarketplacePlugins", "application/proto", "\x08\x01", "\x0a\x04list"},
 		{"account profile", "POST", "/aiserver.v1.DashboardService/GetMe", "application/proto", "\x08\x01", "\x0a\x04real"},
 		{"real membership", "GET", "/auth/full_stripe_profile", "", "", `{"membershipType":"free"}`},
 		{"legacy membership", "GET", "/auth/stripe_profile", "", "", `null`},

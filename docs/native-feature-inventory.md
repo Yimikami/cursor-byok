@@ -66,7 +66,8 @@ the bridge does not infer that every MCP tool is read-only or mutating.
   native latency limit and remaining live acceptance work.
 - NameTab and WriteGitBranchName now have provider-backed unary handlers and
   real TLS transport tests, including invalid output handling. UI acceptance
-  remains separate; native commit generation has a real-provider test.
+  remains separate. Commit generation and Agent Review now stay native after
+  successful proxy-off desktop tests. Fix All Issues stays in BYOK chat.
 - Ancillary Cursor RPCs, including historical inline-edit endpoints, now pass
   through with genuine native credentials instead of a blanket local 404.
   Current client callsites and the inline-edit UI still need live verification;
@@ -105,3 +106,10 @@ summary is `ev_936794442074fb7608e14e543d3ab8749475fda3df7633e26b2984e5d82154f7`
 Exact field observations above were also checked directly in the installed file;
 no target JavaScript was executed. A local evidence bundle was exported outside
 the repository; no user credentials or Cursor account database were inspected.
+
+## Native-service desktop follow-up
+
+See [native-services-20261126.md](native-services-20261126.md) for proxy-off and
+BYOK-on Agent Review/commit generation, Task Models, marketplace and voice results.
+See [windows-native-20261126.md](windows-native-20261126.md) for the final Windows
+acceptance at `a2a8c5b`, including same-chat model switching and its limitations.

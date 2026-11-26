@@ -771,23 +771,15 @@ onBeforeUnmount(() => {
           <div class="row-text">
             <div class="row-title">Specialized model routing</div>
             <div class="row-desc">
-              Choose dedicated models for commit message generation and code review.
+              Choose a dedicated model for branch names. Agent Review and commit
+              messages use Cursor's native services; Fix All Issues uses your chat model.
             </div>
             <div class="special-model-grid">
               <label class="special-model-field">
-                <span>Commit generator</span>
+                <span>Branch name generator</span>
                 <select v-model="cfg.commitModelID" @change="persistConfig">
                   <option value="">Default model</option>
                   <option v-for="opt in modelOptions" :key="`commit-${opt.value}`" :value="opt.value">
-                    {{ opt.label }}
-                  </option>
-                </select>
-              </label>
-              <label class="special-model-field">
-                <span>Code review</span>
-                <select v-model="cfg.reviewModelID" @change="persistConfig">
-                  <option value="">Default model</option>
-                  <option v-for="opt in modelOptions" :key="`review-${opt.value}`" :value="opt.value">
                     {{ opt.label }}
                   </option>
                 </select>
