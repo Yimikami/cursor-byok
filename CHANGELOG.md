@@ -49,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Validation and limits
 
 - Real macOS Cursor 3.32.4 checks cover the native model picker, same-chat model-a → model-b → model-a switching, file/terminal tools, MCP, skills, Ask/Plan/Debug/Multitask, commit generation, Cmd-K and Tab. See [the native test report](docs/macos-native-20261126.md).
-- Windows shares the picker fix and automated checks; a final Windows desktop run of this selector is not claimed. Hosted XSearch and image generation failed upstream in the tested account; cloud/indexing/voice/video features are not certified.
+- Windows Cursor 3.32.4 passed the seven requested native acceptance checks at `a2a8c5b`, including the picker, same-chat model switching, Plan/Build, Tab, MCP/skills/modes, dashboard save races and restoration. See [the Windows report](docs/windows-native-20261126.md); it predates the final native-review routing change.
+- The final native-routing change passed macOS Agent Review and commit generation with BYOK on; Task Models selection, marketplace access and user-driven voice coding also passed. See [the native-service follow-up](docs/native-services-20261126.md). Hosted XSearch and image generation failed upstream in the tested account; conditional cloud/indexing/video features are not certified.
 - Quit Cursor before starting or stopping the proxy so its preference cache cannot overwrite restored settings. A saved, disabled native OpenAI key prevents automatic own-key mode activation.
 
 ## [1.0.2] - 2026-07-26
