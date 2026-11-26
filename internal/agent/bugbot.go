@@ -26,14 +26,45 @@ var BugBotSSEHeaders = http.Header{
 const bugBotMaxLoopRounds = 20
 
 type bugBotReportItem struct {
-	Title       string  `json:"title"`
-	Description string  `json:"description"`
-	Severity    string  `json:"severity"`
-	Confidence  float32 `json:"confidence"`
-	Rationale   string  `json:"rationale"`
-	File        string  `json:"file"`
-	StartLine   int32   `json:"start_line"`
-	EndLine     int32   `json:"end_line"`
+	Title       string           `json:"title"`
+	Description string           `json:"description"`
+	Severity    string           `json:"severity"`
+	Confidence  reviewConfidence `json:"confidence"`
+	Rationale   string           `json:"rationale"`
+	File        string           `json:"file"`
+	StartLine   int32            `json:"start_line"`
+	EndLine     int32            `json:"end_line"`
+}
+
+// reviewConfidence keeps qualitative provider confidence from discarding an
+// otherwise valid finding. There is no calibrated numeric equivalent for a
+// label such as "high", so those labels leave the optional native score unset.
+type reviewConfidence float32
+
+func (c *reviewConfidence) UnmarshalJSON(data []byte) error {
+	var score float32
+	if string(data) == "null" {
+		*c = 0
+		return nil
+	}
+	if err := json.Unmarshal(data, &score); err != nil {
+		var label string
+		if json.Unmarshal(data, &label) != nil {
+			return fmt.Errorf("review confidence must be a number or confidence label")
+		}
+		switch strings.ToLower(strings.TrimSpace(label)) {
+		case "low", "medium", "high":
+			*c = 0
+			return nil
+		default:
+			return fmt.Errorf("unknown review confidence label")
+		}
+	}
+	if score < 0 || score > 1 {
+		return fmt.Errorf("review confidence must be between 0 and 1")
+	}
+	*c = reviewConfidence(score)
+	return nil
 }
 
 func HandleWriteGitCommitMessage(ctx context.Context, reqBody []byte, contentType string, resolve AdapterResolver, selectedModel string) Result {
@@ -80,7 +111,7 @@ func HandleBugBotRunSSE(ctx context.Context, reqBody []byte, contentType string,
 	}
 	target, ok := ResolveAdapterForBugBotRequest(resolve(), sess.BugBotRequest)
 	if strings.TrimSpace(selectedModel) != "" {
-		target, ok = ResolveAdapterForModel(resolve(), selectedModel)
+		target, ok = ResolveAdapterForReview(resolve(), selectedModel)
 	}
 	if !ok {
 		writeBugBotEndStreamError(w, "no BYOK adapter configured")
@@ -193,7 +224,7 @@ func runBugBotReview(ctx context.Context, requestID string, sess *Session, baseU
 		return nil, fmt.Errorf("missing bugbot request")
 	}
 	messages := []openAIMessage{
-		textMessage("system", "You are a strict code reviewer. Find only real bugs or meaningful regressions in the provided diff. Use tools when needed. Return either 'NO_ISSUES' or a JSON array. Each array item must contain: title, description, severity, confidence, rationale, file, start_line, end_line."),
+		textMessage("system", "You are a strict code reviewer. Find only real bugs or meaningful regressions in the provided diff. Use tools when needed. Return either 'NO_ISSUES' or a JSON array. Each array item must contain: title, description, severity, confidence, rationale, file, start_line, end_line. Use a numeric confidence between 0 and 1, integer line numbers, and strings for the other fields. Return no prose outside the JSON array."),
 		textMessage("user", sess.UserText),
 	}
 	tools := openAIToolsForRequest(sess)
@@ -437,7 +468,8 @@ func toBugReports(parsed []bugBotReportItem) []*aiserverv1.BugReport {
 			Rationale:   protoString(p.Rationale),
 		}
 		if p.Confidence > 0 {
-			bug.Confidence = &p.Confidence
+			score := float32(p.Confidence)
+			bug.Confidence = &score
 		}
 		if p.File != "" {
 			loc := &aiserverv1.BugLocation{File: p.File, StartLine: maxInt32(p.StartLine, 1), EndLine: maxInt32(maxInt32(p.EndLine, p.StartLine), 1)}

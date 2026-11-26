@@ -53,8 +53,65 @@ func IsLocalSessionToken(token string) bool {
 // PrepareCursorAuth preserves every field of an existing Cursor account and
 // requires a real sign-in. Older local-session backups are restored solely as
 // a migration; new sessions never fabricate an account or subscription.
+// Call only from explicit Start: a denied macOS Keychain read may request
+// access once. Automatic recovery and request guards use noninteractive paths.
 func PrepareCursorAuth(backupPath string) error {
+	return prepareCursorAuthWithPermission(func() error {
+		return PrepareCursorAuthWithoutInteraction(backupPath)
+	}, RequestCursorKeychainAccess)
+}
+
+// PrepareCursorAuthWithoutInteraction performs the same account validation and
+// legacy migration without displaying a Keychain dialog. A lifecycle caller can
+// share one explicit permission attempt across recovery and this preflight.
+func PrepareCursorAuthWithoutInteraction(backupPath string) error {
 	return prepareCursorAuthAt(stateDBPath(), backupPath)
+}
+
+func prepareCursorAuthWithPermission(prepare, requestAccess func() error) error {
+	var permission CursorKeychainPermissionAttempt
+	return permission.Run(prepare, requestAccess)
+}
+
+// CursorKeychainPermissionAttempt limits one explicit Start action to one
+// permission request, even when both legacy recovery and preflight need access.
+// Use only for explicit user actions, never requests or automatic recovery.
+// The zero value is ready to use; its caller must serialize calls to Run.
+type CursorKeychainPermissionAttempt struct{ requested, granted bool }
+
+func (p *CursorKeychainPermissionAttempt) Run(prepare, requestAccess func() error) error {
+	err := prepare()
+	if !cursorKeychainPermissionDenied(err) {
+		return err
+	}
+	if p.requested {
+		if p.granted {
+			return cursorKeychainRetryError(err)
+		}
+		return err
+	}
+	// Only explicit access-denied/interaction-required statuses justify UI.
+	// Missing items, malformed ciphertext and unavailable builds cannot be
+	// repaired by asking for permission, and must not trigger a prompt.
+	p.requested = true
+	if err := requestAccess(); err != nil {
+		return fmt.Errorf("Cursor Keychain access was not granted; existing state retained: %w", err)
+	}
+	p.granted = true
+	// Never loop: denial or another failure on this retry remains visible.
+	return cursorKeychainRetryError(prepare())
+}
+
+func cursorKeychainPermissionDenied(err error) bool {
+	var keychainErr *CursorKeychainAccessError
+	return errors.As(err, &keychainErr) && keychainErr != nil && (keychainErr.Status == -25293 || keychainErr.Status == -25308 || keychainErr.Status == -25315)
+}
+
+func cursorKeychainRetryError(err error) error {
+	if !cursorKeychainPermissionDenied(err) {
+		return err
+	}
+	return fmt.Errorf("Cursor Keychain access is still unavailable after approval; ongoing account ownership checks require Always Allow for cursor-byok's access to Cursor Safe Storage. Start again and choose Always Allow in the macOS dialog: %w", err)
 }
 
 func prepareCursorAuthAt(dbPath, backupPath string) error {
@@ -78,21 +135,14 @@ func prepareCursorAuthAt(dbPath, backupPath string) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read current Cursor account: %w", err)
 	}
-	var email string
-	emailErr := tx.QueryRow("SELECT value FROM ItemTable WHERE key = ?", "cursorAuth/cachedEmail").Scan(&email)
-	if emailErr != nil && !errors.Is(emailErr, sql.ErrNoRows) {
-		return fmt.Errorf("read current Cursor account marker: %w", emailErr)
+	// The request guard must be able to compare the decrypted identity before
+	// routing is enabled. Plain tokens pass through unchanged; unavailable
+	// safeStorage support fails here instead of causing every request to 401.
+	decoded, err := decodeCursorAuthToken(dbPath, token)
+	if err != nil {
+		return fmt.Errorf("cannot identify Cursor account; existing state retained: %w", err)
 	}
-	// Windows safeStorage migration also wraps the legacy temporary token.
-	// On other platforms an encrypted real account is preserved verbatim;
-	// an encrypted temporary marker cannot be cleared without identifying it.
-	if runtime.GOOS == "windows" || email == fakeProEmail {
-		decoded, err := decodeCursorAuthToken(dbPath, token)
-		if err != nil {
-			return fmt.Errorf("cannot identify Cursor account; existing state retained: %w", err)
-		}
-		token = decoded
-	}
+	token = decoded
 	if IsLocalSessionToken(token) {
 		// An unbacked legacy fake is not an account we can recover. Remove
 		// only its known owned fields so Cursor can perform a normal sign-in.

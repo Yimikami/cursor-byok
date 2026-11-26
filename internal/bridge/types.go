@@ -14,19 +14,20 @@ type ProxyState struct {
 }
 
 type ModelAdapterConfig struct {
-	DisplayName     string `json:"displayName"`
-	Type            string `json:"type"`
-	BaseURL         string `json:"baseURL"`
-	APIKey          string `json:"apiKey"`
-	ModelID         string `json:"modelID"`
-	ContextWindow   string `json:"contextWindow,omitempty"`
+	ID                      string   `json:"id,omitempty"`
+	DisplayName             string   `json:"displayName"`
+	Type                    string   `json:"type"`
+	BaseURL                 string   `json:"baseURL"`
+	APIKey                  string   `json:"apiKey"`
+	ModelID                 string   `json:"modelID"`
+	ContextWindow           string   `json:"contextWindow,omitempty"`
 	SupportedThinkingLevels []string `json:"supportedThinkingLevels,omitempty"` // "none", "minimal", "low", "medium", "high", "xhigh"
-	ServiceTier     string `json:"serviceTier,omitempty"`
-	MaxOutputTokens string `json:"maxOutputTokens,omitempty"`
-	ThinkingBudget  string `json:"thinkingBudget,omitempty"`
-	Notes           string `json:"notes,omitempty"`
-	LastTestResult  string `json:"lastTestResult,omitempty"`
-	LastTestedAt    int64  `json:"lastTestedAt,omitempty"`
+	ServiceTier             string   `json:"serviceTier,omitempty"`
+	MaxOutputTokens         string   `json:"maxOutputTokens,omitempty"`
+	ThinkingBudget          string   `json:"thinkingBudget,omitempty"`
+	Notes                   string   `json:"notes,omitempty"`
+	LastTestResult          string   `json:"lastTestResult,omitempty"`
+	LastTestedAt            int64    `json:"lastTestedAt,omitempty"`
 }
 
 type UserConfig struct {
@@ -34,6 +35,7 @@ type UserConfig struct {
 	ModelAdapters []ModelAdapterConfig `json:"modelAdapters"`
 	ActiveModelID string               `json:"activeModelID,omitempty"`
 	CommitModelID string               `json:"commitModelID,omitempty"`
+	ReviewRoute   string               `json:"reviewRoute,omitempty"` // "cursor" opts into native Bugbot billing; empty means BYOK.
 	ReviewModelID string               `json:"reviewModelID,omitempty"`
 	// CloseAction remembers what the user picked in the "Quit or minimize
 	// to tray?" dialog. Empty = never answered, show the dialog on close.

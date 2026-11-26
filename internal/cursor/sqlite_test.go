@@ -33,6 +33,25 @@ func TestPrepareCursorAuthPreservesRealAccountWithoutBackup(t *testing.T) {
 	}
 }
 
+func TestPrepareCursorAuthRejectsUnreadableEncryptedAccountWithoutChangingIt(t *testing.T) {
+	original := map[string]string{
+		"cursorAuth/accessToken":  cursorSafeStoragePrefix + "not-valid-base64!",
+		"cursorAuth/refreshToken": "encrypted-refresh", "cursorAuth/cachedEmail": "real@example.test",
+		"cursorAuth/stripeMembershipType": "free", "unrelated": "keep",
+	}
+	db, path, backup := testCursorDB(t, original)
+	err := prepareCursorAuthAt(path, backup)
+	if err == nil || !strings.Contains(err.Error(), "invalid Cursor safeStorage envelope") || !strings.Contains(err.Error(), "existing state retained") {
+		t.Fatalf("unreadable encrypted account passed preflight: %v", err)
+	}
+	if got := readTestItems(t, db); !reflect.DeepEqual(got, original) {
+		t.Fatal("preflight changed the unreadable account")
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("preflight created an auth backup: %v", err)
+	}
+}
+
 func TestPrepareCursorAuthMigratesLegacyBackup(t *testing.T) {
 	original := map[string]string{
 		"cursorAuth/accessToken": "real-session", "cursorAuth/refreshToken": "real-refresh",
@@ -249,7 +268,7 @@ func TestModelPinNeverOwnsCloudBackgroundPreferences(t *testing.T) {
 				t.Fatal("start created native cloud preferences")
 			}
 			bk, err := readModelBackup(backup)
-			if err != nil || bk.Version != 2 {
+			if err != nil || bk.Version != 3 {
 				t.Fatalf("invalid local-only backup: version=%d err=%v", bk.Version, err)
 			}
 			for _, entry := range bk.Values {
@@ -283,6 +302,7 @@ func TestLegacyModelBackupStillRestoresOldCloudOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	bk.Version = 1
+	bk.Values = bk.Values[:len(modelPreferencePathsV2())] // v1 did not own native picker state
 	old, _ := decodeApplicationUser([]byte(original))
 	cloud := old["featureModelConfigs"].(map[string]any)["backgroundComposer"].(map[string]any)
 	for _, key := range []string{"defaultModel", "fallbackModels", "bestOfNDefaultModels"} {
@@ -294,6 +314,7 @@ func TestLegacyModelBackupStillRestoresOldCloudOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	current := readTestPreferences(t, db)
+	delete(current, "useOpenAIKey") // emulate a session created by the old release
 	current["featureModelConfigs"].(map[string]any)["backgroundComposer"] = map[string]any{"defaultModel": "old-local-byok", "fallbackModels": []any{"old-local-byok"}, "bestOfNDefaultModels": []any{"old-local-byok"}}
 	writeTestPreferences(t, db, current)
 	if err := restoreModelSelectionAt(path, backup); err != nil {

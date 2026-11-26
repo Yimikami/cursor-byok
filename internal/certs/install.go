@@ -78,21 +78,9 @@ func UninstallUserRoot(certPaths ...string) error {
 		}
 		return nil
 	case "darwin":
-		out, removeErr := exec.Command("security", "remove-trusted-cert", certPath).CombinedOutput()
-		// Older releases wrote admin-domain trust despite documenting a
-		// user-only install. Remove that legacy trust only when this exact
-		// certificate remains trusted after removing user-domain trust.
-		if IsInstalledUserRoot(certPath) {
-			out, err := exec.Command("security", "remove-trusted-cert", "-d", certPath).CombinedOutput()
-			if err != nil {
-				return fmt.Errorf("remove legacy admin CA trust: %w (%s)", err, trim(out))
-			}
-			return nil
-		}
-		if removeErr != nil {
-			return fmt.Errorf("security remove-trusted-cert: %w (%s)", removeErr, trim(out))
-		}
-		return nil
+		return uninstallDarwinRoot(certPath, cert, queryDarwinTrust, func(name string, args ...string) ([]byte, error) {
+			return exec.Command(name, args...).CombinedOutput()
+		})
 	case "linux":
 		db, err := linuxNSSDBPath()
 		if err != nil {
@@ -188,10 +176,7 @@ func isInstalledUserRoot(platform, certPath string, run func(string, ...string) 
 		_, err := run("certutil", "-user", "-store", "Root", certificateStoreID(cert))
 		return err == nil
 	case "darwin":
-		// Presence in a keychain does not imply trust. Evaluate the exact
-		// certificate against local trust settings, allowing a CA as leaf.
-		_, err := run("security", "verify-cert", "-q", "-L", "-l", "-p", "basic", "-c", certPath)
-		return err == nil
+		return isDarwinRootTrusted(certPath, cert, queryDarwinTrust, run)
 	case "linux":
 		db, err := linuxNSSDBPath()
 		if err != nil {

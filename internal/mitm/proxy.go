@@ -66,6 +66,8 @@ func shouldMITMHost(host string) bool {
 	return isCursorAPI2Host(host)
 }
 
+type nativeReviewRequestKey struct{}
+
 type Server struct {
 	addr        string
 	srv         *http.Server
@@ -195,13 +197,33 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		if req.URL == nil {
 			return req, makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"invalid request URL"}`)
 		}
-		if isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
+		// Snapshot the billing choice once per request. Established Bidi inputs
+		// retain their original route in the registry even if settings change.
+		nativeReview := isCursorAPI2Host(req.URL.Host) && reviewPath(req.URL.Path) &&
+			selectedModel != nil && selectedModel("review-route") == "cursor"
+		if !nativeReview && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
+			return req, makeJSONResp(req, http.StatusForbidden, `{"code":"permission_denied","message":"BYOK requests must originate from the Cursor desktop application"}`)
+		}
+		if req.Method != http.MethodOptions && isCursorAPI2Host(req.URL.Host) && reviewPath(req.URL.Path) &&
+			(strings.HasSuffix(req.URL.Path, "SSE") || strings.HasSuffix(req.URL.Path, "Poll")) {
+			mode, err := bidiRoutes.existingMode(req, strings.HasSuffix(req.URL.Path, "Poll"))
+			if err != nil {
+				return req, bidiRouteError(req, http.StatusBadRequest, err.Error())
+			}
+			if mode != "" {
+				nativeReview = mode == "native"
+			}
+		}
+		if nativeReview {
+			*req = *req.WithContext(context.WithValue(req.Context(), nativeReviewRequestKey{}, true))
+		}
+		if !nativeReview && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && !allowedNativeOrigin(req) {
 			return req, makeJSONResp(req, http.StatusForbidden, `{"code":"permission_denied","message":"BYOK requests must originate from the Cursor desktop application"}`)
 		}
 		if debug {
 			log.Printf("[REQ] %s %s%s (CT: %s)", req.Method, req.URL.Host, req.URL.Path, req.Header.Get("Content-Type"))
 		}
-		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" && isCursorAPI2Host(req.URL.Host) && localProxyPath(req.URL.Path) {
+		if req.Method == http.MethodOptions && req.Header.Get("Access-Control-Request-Method") != "" && isCursorAPI2Host(req.URL.Host) && localProxyPath(req.URL.Path) && !nativeReview {
 			return req, &http.Response{
 				StatusCode: http.StatusNoContent,
 				Status:     "204 No Content",
@@ -211,7 +233,9 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 				Header: http.Header{
 					"Access-Control-Allow-Origin":  {"*"},
 					"Access-Control-Allow-Methods": {"GET,POST,PUT,PATCH,DELETE,OPTIONS"},
-					"Access-Control-Allow-Headers": {"*"},
+					// Authorization is not covered by the CORS wildcard. Echo the
+					// requested headers only after the native-origin guard above.
+					"Access-Control-Allow-Headers": {req.Header.Get("Access-Control-Request-Headers")},
 					"Access-Control-Max-Age":       {"86400"},
 				},
 				Body:    io.NopCloser(strings.NewReader("")),
@@ -224,16 +248,23 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 			if req.Method == http.MethodOptions {
 				return nativePassthroughRequest(req)
 			}
-			if paidLocalPath(path) && (authorize == nil || !authorize(req.Context(), req.Header)) {
+			if !nativeReview && paidLocalPath(path) && (authorize == nil || !authorize(req.Context(), req.Header)) {
 				return req, makeJSONResp(req, http.StatusUnauthorized, `{"code":"unauthenticated","message":"Local inference requires the current Cursor account."}`)
 			}
-			if unsupportedLocalBidiPoll(path) {
+			if !nativeReview && unsupportedLocalBidiPoll(path) {
 				return req, makeJSONResp(req, http.StatusNotImplemented, `{"code":"unimplemented","message":"Local BYOK polling is not supported; use WebSocket or SSE"}`)
 			}
 			if path == "/aiserver.v1.BidiService/BidiAppend" {
-				return bidiRoutes.append(req)
+				return bidiRoutes.append(req, authorize)
+			}
+			if nativeReview && path == "/aiserver.v1.AiService/StreamBugBotAgentic" {
+				return nativePassthroughRequest(req)
 			}
 			poll, native := nativeBidiStreams[path]
+			if nativeReview {
+				native = true
+				poll = strings.HasSuffix(path, "Poll")
+			}
 			if localBidiStream(path) || native {
 				mode := "local"
 				if native {
@@ -277,27 +308,18 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 			if path == "/aiserver.v1.InferenceService/RunInferenceSSE" {
 				return req, handleInferenceSSE(req, serverCtx, resolver)
 			}
-			if path == "/aiserver.v1.CppService/AvailableModels" {
-				return req, handleAvailableCppModels(req, resolver)
-			}
-			if path == "/aiserver.v1.AiService/CppConfig" {
-				return req, handleCppConfig(req, resolver)
-			}
-			if path == "/aiserver.v1.AiService/StreamCpp" {
-				return req, handleStreamCpp(req, serverCtx, resolver, selectedModel("tab"))
-			}
-			if path == "/aiserver.v1.AiService/NameTab" {
-				return req, handleNativeText(req, resolver, "")
-			}
-			if path == "/aiserver.v1.AiService/WriteGitBranchName" {
-				return req, handleNativeText(req, resolver, selectedModel("commit"))
-			}
-			if path == "/aiserver.v1.AiService/WriteGitCommitMessage" {
-				return req, handleWriteGitCommitMessage(req, resolver, selectedModel("commit"))
-			}
 			if path == "/aiserver.v1.AiService/StreamBugBotAgenticSSE" {
-				return req, handleBugBotRunSSE(req, serverCtx, resolver, selectedModel("review"))
+				model := ""
+				if selectedModel != nil {
+					model = selectedModel("review")
+				}
+				return req, handleBugBotRunSSE(req, serverCtx, resolver, model)
 			}
+			if path == "/aiserver.v1.AiService/StreamBugBotAgentic" {
+				return req, makeJSONResp(req, http.StatusNotImplemented, `{"code":"unimplemented","message":"BYOK Agent Review requires the SSE transport; native billing fallback is disabled"}`)
+			}
+			// Titles, branch names, Tab and commit messages use Cursor services.
+			// Agent Review and Fix All Issues remain on the BYOK routes above.
 			return nativePassthroughRequest(req)
 		}
 		return req, nil
@@ -320,7 +342,7 @@ func newWithAuthorizer(addr string, ca *certs.CA, gw *relay.Gateway, resolver Ag
 		if gw != nil {
 			gw.MaybeRewriteResponse(req, resp)
 		}
-		if req != nil && req.URL != nil && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) {
+		if req != nil && req.URL != nil && isCursorAPI2Host(req.URL.Host) && localOriginProtectedPath(req.URL.Path) && req.Context().Value(nativeReviewRequestKey{}) != true {
 			applyNativeCORS(req, resp)
 		}
 		return resp
@@ -377,35 +399,6 @@ func handleBidiAppend(req *http.Request) *http.Response {
 func handleRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver) *http.Response {
 	return streamAgentResponse(req, serverCtx, agent.RunSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
 		agent.HandleRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver)
-	})
-}
-
-func handleWriteGitCommitMessage(req *http.Request, resolver agent.AdapterResolver, selectedModel string) *http.Response {
-	body, err := readDecodedBody(req)
-	if err != nil {
-		return makeJSONResp(req, http.StatusBadRequest, `{"code":"invalid_argument","message":"read body: `+err.Error()+`"}`)
-	}
-	res := agent.HandleWriteGitCommitMessage(req.Context(), body, req.Header.Get("Content-Type"), resolver, selectedModel)
-	hdr := http.Header{}
-	if res.ContentType != "" {
-		hdr.Set("Content-Type", res.ContentType)
-	}
-	return &http.Response{
-		Status:        http.StatusText(res.Status),
-		StatusCode:    res.Status,
-		Proto:         req.Proto,
-		ProtoMajor:    req.ProtoMajor,
-		ProtoMinor:    req.ProtoMinor,
-		Body:          io.NopCloser(bytes.NewReader(res.Body)),
-		ContentLength: int64(len(res.Body)),
-		Header:        hdr,
-		Request:       req,
-	}
-}
-
-func handleBugBotRunSSE(req *http.Request, serverCtx context.Context, resolver agent.AdapterResolver, selectedModel string) *http.Response {
-	return streamAgentResponse(req, serverCtx, agent.BugBotSSEHeaders, func(ctx context.Context, body []byte, w io.Writer) {
-		agent.HandleBugBotRunSSE(ctx, body, req.Header.Get("Content-Type"), w, resolver, selectedModel)
 	})
 }
 

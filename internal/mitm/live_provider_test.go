@@ -1,12 +1,10 @@
 package mitm
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,7 +16,6 @@ import (
 	"cursor-byok/internal/agent"
 	"cursor-byok/internal/certs"
 	agentv1 "cursor-byok/internal/protocodec/gen/agent/v1"
-	aiserverv1 "cursor-byok/internal/protocodec/gen/aiserver/v1"
 	"github.com/coder/websocket"
 	"google.golang.org/protobuf/proto"
 )
@@ -80,22 +77,6 @@ func TestLiveProviderNativeProtocol(t *testing.T) {
 		answer, err := agent.ProbeAdapter(ctx, target)
 		if err != nil || strings.TrimSpace(answer) == "" {
 			t.Fatalf("probe: %v", err)
-		}
-	})
-	t.Run("commit-generation", func(t *testing.T) {
-		body, _ := proto.Marshal(&aiserverv1.WriteGitCommitMessageRequest{Diffs: []string{"diff --git a/add.go b/add.go\n--- a/add.go\n+++ b/add.go\n@@ -1 +1 @@\n-func add(a,b int) int { return a-b }\n+func add(a,b int) int { return a+b }"}})
-		resp, err := client.Post("https://api2.cursor.sh/aiserver.v1.AiService/WriteGitCommitMessage", "application/proto", bytes.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		raw, _ := io.ReadAll(resp.Body)
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("commit status %d", resp.StatusCode)
-		}
-		var out aiserverv1.WriteGitCommitMessageResponse
-		if err := proto.Unmarshal(raw, &out); err != nil || strings.TrimSpace(out.CommitMessage) == "" {
-			t.Fatalf("empty/invalid commit: %v", err)
 		}
 	})
 	t.Run("websocket-read-roundtrip", func(t *testing.T) {

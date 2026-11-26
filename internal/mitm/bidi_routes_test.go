@@ -185,13 +185,14 @@ func TestBidiNativeCredentialMismatchAndReplayFailures(t *testing.T) {
 
 func TestBidiRegistryStopsAndBoundsPendingRequests(t *testing.T) {
 	routes := newBidiRouteRegistry()
-	routes.queuedBytes = bidiRouteLimit
+	routes.entries["fixture"] = &bidiRoute{touched: time.Now(), pending: map[int64]queuedBidiRequest{0: {body: make([]byte, bidiStagingLimit)}}}
+	routes.queuedBytes = bidiStagingLimit
 	_, resp := routes.append(routeAppendRequest("full", 0, []byte{10, 1, 'x'}, false))
 	if resp == nil || resp.StatusCode != 429 {
 		t.Fatal("queue limit not enforced")
 	}
 	closeRouteResponse(resp)
-	routes.queuedBytes = 0
+	routes.dropEntryLocked("fixture")
 	_, resp = routes.append(routeAppendRequest("queued", 0, []byte{10, 1, 'x'}, false))
 	closeRouteResponse(resp)
 	routes.close()
@@ -208,79 +209,96 @@ func TestBidiRegistryStopsAndBoundsPendingRequests(t *testing.T) {
 // Exercise the installed request/response hooks and the real verified upstream
 // transport, including the append-before-stream case that native Cursor uses.
 func TestNativeBidiReplayThroughProxy(t *testing.T) {
-	p := nativeTestProxy(t)
-	var mu sync.Mutex
-	var paths []string
-	var bodies [][]byte
-	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Error(err)
-		}
-		if r.Header.Get("Authorization") != "Bearer native-test-token" || r.Header.Get("Cookie") != "owner=native" || r.Header.Get("Proxy-Authorization") != "" {
-			t.Error("native credentials or proxy header scope changed")
-		}
-		mu.Lock()
-		paths = append(paths, r.URL.Path)
-		bodies = append(bodies, body)
-		mu.Unlock()
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusAccepted)
-			return
-		}
-		w.Header().Set("Content-Type", "application/proto")
-		_, _ = w.Write([]byte("native-response"))
-	}))
-	defer upstream.Close()
-	pool := x509.NewCertPool()
-	pool.AddCert(upstream.Certificate())
-	p.Tr.TLSClientConfig.RootCAs = pool
-	p.Tr.TLSClientConfig.ServerName = "127.0.0.1"
-	p.Tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
-	}
-	owner := "native-proxy-owner"
-	queued := routeAppendRequest(owner, 0, []byte{10, 1, 'a'}, true)
-	expected, _ := io.ReadAll(queued.Body)
-	queued.Body = io.NopCloser(bytes.NewReader(expected))
-	appendRecord := httptest.NewRecorder()
-	p.ServeHTTP(appendRecord, queued)
-	mu.Lock()
-	beforeAttach := len(paths)
-	mu.Unlock()
-	if appendRecord.Code != 200 || beforeAttach != 0 {
-		t.Fatalf("unknown append reached upstream: status=%d calls=%d", appendRecord.Code, beforeAttach)
-	}
-	streamPath := "/aiserver.v1.AiService/StreamSttSSE"
-	streamRecord := httptest.NewRecorder()
-	p.ServeHTTP(streamRecord, routeStreamRequest(owner, streamPath, false))
-	if streamRecord.Code != 200 || streamRecord.Body.String() != "native-response" {
-		t.Fatalf("native stream intercepted: status=%d body=%q", streamRecord.Code, streamRecord.Body.String())
-	}
-	mu.Lock()
-	if len(paths) != 2 || paths[0] != "/aiserver.v1.BidiService/BidiAppend" || paths[1] != streamPath || !bytes.Equal(bodies[0], expected) {
-		t.Errorf("queued original append/stream were not replayed in order: %v", paths)
-	}
-	mu.Unlock()
-	lateRecord := httptest.NewRecorder()
-	p.ServeHTTP(lateRecord, routeAppendRequest(owner, 1, []byte{10, 1, 'b'}, false))
-	if lateRecord.Code != 200 || lateRecord.Body.String() != "native-response" {
-		t.Fatal("established native append did not reach the upstream transport")
-	}
-	// Native preflight belongs to the upstream, while explicit local BYOK
-	// endpoints still receive the proxy's own CORS response.
 	for _, tc := range []struct {
 		path string
-		want int
-	}{{"/native/future-feature", http.StatusAccepted}, {inferenceSSEPath, http.StatusNoContent}} {
-		req := routeStreamRequest(owner, tc.path, false)
-		req.Method = http.MethodOptions
-		req.Header.Set("Access-Control-Request-Method", http.MethodPost)
-		rec := httptest.NewRecorder()
-		p.ServeHTTP(rec, req)
-		if rec.Code != tc.want {
-			t.Errorf("OPTIONS %s: got %d, want %d", tc.path, rec.Code, tc.want)
-		}
+		poll bool
+	}{
+		{"/aiserver.v1.AiService/StreamSttSSE", false},
+		{"/aiserver.v1.AiService/StreamBugBotAgenticSSE", false},
+		{"/aiserver.v1.AiService/StreamBugBotAgenticPoll", true},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			if !reviewPath(tc.path) && (localBidiStream(tc.path) || unsupportedLocalBidiPoll(tc.path) || paidLocalPath(tc.path)) {
+				t.Fatal("native stream classified as local BYOK")
+			}
+			p := nativeTestProxyWithAuthorizer(t, "cursor", func(context.Context, http.Header) bool {
+				t.Error("native Bidi flow accessed local account state")
+				return false
+			})
+			var mu sync.Mutex
+			var paths []string
+			var bodies [][]byte
+			upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Error(err)
+				}
+				if r.Header.Get("Authorization") != "Bearer native-test-token" || r.Header.Get("Cookie") != "owner=native" || r.Header.Get("Proxy-Authorization") != "" {
+					t.Error("native credentials or proxy header scope changed")
+				}
+				mu.Lock()
+				paths = append(paths, r.URL.Path)
+				bodies = append(bodies, body)
+				mu.Unlock()
+				if r.Method == http.MethodOptions {
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				w.Header().Set("Content-Type", "application/proto")
+				_, _ = w.Write([]byte("native-response"))
+			}))
+			defer upstream.Close()
+			pool := x509.NewCertPool()
+			pool.AddCert(upstream.Certificate())
+			p.Tr.TLSClientConfig.RootCAs = pool
+			p.Tr.TLSClientConfig.ServerName = "127.0.0.1"
+			p.Tr.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
+			}
+			owner := "native-proxy-owner"
+			queued := routeAppendRequest(owner, 0, []byte{10, 1, 'a'}, true)
+			expected, _ := io.ReadAll(queued.Body)
+			queued.Body = io.NopCloser(bytes.NewReader(expected))
+			appendRecord := httptest.NewRecorder()
+			p.ServeHTTP(appendRecord, queued)
+			mu.Lock()
+			beforeAttach := len(paths)
+			mu.Unlock()
+			if appendRecord.Code != 200 || beforeAttach != 0 {
+				t.Fatalf("unknown append reached upstream: status=%d calls=%d", appendRecord.Code, beforeAttach)
+			}
+			streamPath := tc.path
+			streamRecord := httptest.NewRecorder()
+			p.ServeHTTP(streamRecord, routeStreamRequest(owner, streamPath, tc.poll))
+			if streamRecord.Code != 200 || streamRecord.Body.String() != "native-response" {
+				t.Fatalf("native stream intercepted: status=%d body=%q", streamRecord.Code, streamRecord.Body.String())
+			}
+			mu.Lock()
+			if len(paths) != 2 || paths[0] != "/aiserver.v1.BidiService/BidiAppend" || paths[1] != streamPath || !bytes.Equal(bodies[0], expected) {
+				t.Errorf("queued original append/stream were not replayed in order: %v", paths)
+			}
+			mu.Unlock()
+			lateRecord := httptest.NewRecorder()
+			p.ServeHTTP(lateRecord, routeAppendRequest(owner, 1, []byte{10, 1, 'b'}, false))
+			if lateRecord.Code != 200 || lateRecord.Body.String() != "native-response" {
+				t.Fatal("established native append did not reach the upstream transport")
+			}
+			// Native preflight belongs to the upstream, while explicit local BYOK
+			// endpoints still receive the proxy's own CORS response.
+			for _, tc := range []struct {
+				path string
+				want int
+			}{{"/native/future-feature", http.StatusAccepted}, {inferenceSSEPath, http.StatusNoContent}} {
+				req := routeStreamRequest(owner, tc.path, false)
+				req.Method = http.MethodOptions
+				req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+				rec := httptest.NewRecorder()
+				p.ServeHTTP(rec, req)
+				if rec.Code != tc.want {
+					t.Errorf("OPTIONS %s: got %d, want %d", tc.path, rec.Code, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -293,7 +311,7 @@ func TestLocalBidiPollFailsWithoutNativeForwarding(t *testing.T) {
 		})
 		return req, nil
 	})
-	for _, path := range []string{"/agent.v1.AgentService/RunPoll", "/aiserver.v1.InferenceService/RunInferencePoll", "/aiserver.v1.AiService/StreamBugBotAgenticPoll"} {
+	for _, path := range []string{"/agent.v1.AgentService/RunPoll", "/aiserver.v1.InferenceService/RunInferencePoll", "/aiserver.v1.AiService/StreamBugBotAgenticPoll", "/aiserver.v1.AiService/StreamBugBotAgentic"} {
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, routeStreamRequest("unsupported-poll", path, true))
 		if rec.Code != http.StatusNotImplemented || !strings.Contains(rec.Body.String(), "unimplemented") {

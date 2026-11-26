@@ -19,6 +19,7 @@ import (
 // AdapterInfo carries the bits of a configured BYOK adapter that the rewriter
 // needs to forge synthetic responses.
 type AdapterInfo struct {
+	ConfigID                string
 	DisplayName             string
 	Type                    string
 	ModelID                 string

@@ -16,14 +16,8 @@ func TestLocalRoutesRejectBrowserOriginsBeforeDispatch(t *testing.T) {
 	paths := []string{
 		"/agent/v1/run",
 		"/agent.v1.AgentService/RunSSE",
-		"/aiserver.v1.InferenceService/RunInferenceSSE",
+		"/aiserver.v1.InferenceService/RunInferenceSSE", "/aiserver.v1.AiService/StreamBugBotAgenticSSE", "/aiserver.v1.AiService/StreamBugBotAgentic",
 		"/aiserver.v1.BidiService/BidiAppend",
-		"/aiserver.v1.AiService/StreamBugBotAgenticSSE",
-		"/aiserver.v1.AiService/NameTab",
-		"/aiserver.v1.AiService/WriteGitBranchName",
-		"/aiserver.v1.AiService/WriteGitCommitMessage",
-		"/aiserver.v1.AiService/CppConfig",
-		"/aiserver.v1.AiService/StreamCpp",
 	}
 	origins := []string{"https://attacker.example", "null", "file://", "https://vscode-app", cursorRendererOrigin + ".attacker.example", ""}
 	for _, path := range paths {

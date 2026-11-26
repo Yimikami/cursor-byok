@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-26
+
 ### Fixed
 
+- Keep a deleted explicit review selection unavailable until the user chooses a replacement, and distinguish same-name review accounts in the menu.
+- Reserve separate Bidi stream capacity from unclaimed input without evicting acknowledged data or reducing the per-request limit; explicitly allow requested renderer headers during local preflight.
+
+- Keep native voice/review Bidi input independent of local account decryption, while retaining account authorization before BYOK inference and late local input.
+- Keep active native review polls on their original destination when the review setting changes, and distinguish review adapters with identical provider model names using persistent adapter identities.
+
+- Make Agent Review use BYOK by default, with a dashboard choice for Cursor Bugbot that explains native usage and limits. Never silently fall back between billing providers. Fix All Issues continues through BYOK chat.
+- Keep chat titles, branch names, Tab and commit messages on Cursor's native services. Preserve native authentication, errors and quotas without extra BYOK generation calls.
+- Accept qualitative confidence labels in otherwise valid BYOK review reports without inventing numeric scores; request explicit numeric confidence and reject malformed/truncated results.
+- Isolate adapter editor drafts from saved settings during Save and Test, so editing and canceling while a probe runs cannot leak canceled changes into a later save; keep unsaved provider changes open.
+
+- Publish configuration changes as complete private snapshots and serialize readers/writers; prevent a delayed adapter probe from overwriting newer settings.
+- Restore the native model selector for configured BYOK adapters on macOS and Windows using Cursor's own-key mode and named-model view, with exact preference restoration and protection for disabled saved native keys.
+- Respect native schema wrappers, tuple/pattern constraints and repaired Anthropic tool history when normalizing provider arguments; fix real CreatePlan todo-array failures.
+- Keep collection arguments unchanged when numeric conversion would lose precision, and recognize macOS's interaction-required Keychain status during explicit Start.
+- Require the exact macOS CA SSL trust record before reporting readiness, and remove only trust domains containing that certificate.
+- Keep OpenAI alternative choices separate so text, reasoning, tool calls and finish markers from another choice cannot corrupt the selected response.
+
+- Decode macOS Cursor safeStorage sessions for local account ownership checks; validate account access before changing proxy settings and keep Keychain permission requests confined to an explicit service start.
 - Preserve Anthropic signed/redacted thinking and OpenAI reasoning through native tool replay; reconcile output caps and report truncated replies as errors.
 - Publish preference backups atomically, protect restored settings from stale recovery replay, and resolve macOS network services by stable identity.
 - Require the current local Cursor account for paid BYOK requests and reject unrelated browser origins. Bound request bodies and gzip expansion.
@@ -16,11 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ignore inherited CONNECT proxy settings to prevent self-proxy loops; preserve Connect framing and trailers in rewritten model responses.
 - Keep native tool approvals pending until Cursor responds or the run is canceled, instead of manufacturing incomplete results after 30 seconds.
 - Recognize Windows safeStorage-wrapped legacy temporary sessions in memory and retain recovery data when ownership cannot be established.
-- Support native Tab single-line predictions with bounded latency and disable incompatible thinking budgets for short completions.
 - Support Cursor 3.32.4 local-loop inference over WebSocket and SSE, including native tool schemas, streamed tool calls, cancellation and provider errors.
 - Preserve real Cursor sign-in and forward native account, update and extension requests with verified TLS; remove synthetic account creation and blanket auxiliary 404 responses.
 - Preserve JSONC comments and unrelated edits, scope legacy tool results to their owning run, and stop allocating buffers for late shell events.
-- Generate native chat titles and Git branch names through the selected BYOK provider; reject empty or truncated commit/review output.
 - Keep the selected BYOK model when Cursor refreshes defaults, and supply the per-mode tool metadata required by current Plan/Ask/Debug/Multitask clients.
 - Restore Cursor's previous model preferences on Stop, failed startup, and crash recovery. Validate account backups and restore account keys transactionally.
 - Prevent an HTTP/2 connection preface from crashing the proxy during current Cursor startup; retain HTTP/1.1 WebSocket compatibility and route HTTP/2-only native streams through the same handlers, preserving gRPC trailers.
@@ -33,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Regression coverage for certificate identity, proxy failure recovery, JSONC settings, and TLS WebSocket agent streaming. CI now runs the Go test suite on Windows, macOS, and Linux.
+
+### Validation and limits
+
+- Real macOS Cursor 3.32.4 checks cover the native model picker, same-chat model-a → model-b → model-a switching, file/terminal tools, MCP, skills, Ask/Plan/Debug/Multitask, commit generation, Cmd-K and Tab. See [the native test report](docs/macos-native-20261126.md).
+- Windows Cursor 3.32.4 passed the seven requested native acceptance checks at `a2a8c5b`, including the picker, same-chat model switching, Plan/Build, Tab, MCP/skills/modes, dashboard save races and restoration. See [the Windows report](docs/windows-native-20261126.md); it predates the later review choice and native title/branch/Tab routing changes. The later routing behavior is covered separately by macOS desktop and automated transport checks.
+- macOS native Agent Review and commit generation passed with BYOK on; Task Models selection, marketplace access and user-driven voice coding also passed. See [the native-service follow-up](docs/native-services-20261126.md). Hosted XSearch and image generation failed upstream in the tested account; conditional cloud/indexing/video features are not certified.
+- Quit Cursor before starting or stopping the proxy so its preference cache cannot overwrite restored settings. A saved, disabled native OpenAI key prevents automatic own-key mode activation.
 
 ## [1.0.2] - 2026-07-26
 

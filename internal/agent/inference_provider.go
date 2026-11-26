@@ -46,6 +46,7 @@ func inferenceProviderStreamError(result *streamResult) error {
 			Type    string          `json:"type"`
 			Error   json.RawMessage `json:"error"`
 			Choices []struct {
+				Index        int    `json:"index"`
 				FinishReason string `json:"finish_reason"`
 			} `json:"choices"`
 			Delta struct {
@@ -58,7 +59,7 @@ func inferenceProviderStreamError(result *streamResult) error {
 		completed = completed || event.Type == "message_stop"
 		completed = completed || event.Delta.StopReason != ""
 		for _, choice := range event.Choices {
-			completed = completed || choice.FinishReason != ""
+			completed = completed || choice.Index == 0 && choice.FinishReason != ""
 		}
 		if len(event.Error) == 0 || string(event.Error) == "null" {
 			continue

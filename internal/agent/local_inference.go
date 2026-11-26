@@ -169,9 +169,18 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 	if err := validateProviderToolCalls(result.ToolCalls); err != nil {
 		return err
 	}
+	var repairedCalls []PendingToolCall
 	for i, call := range result.ToolCalls {
 		if strings.TrimSpace(call.Arguments) == "" {
 			result.ToolCalls[i].Arguments = "{}"
+		}
+		if !custom[call.Name] {
+			for _, tool := range request.GetTools() {
+				if tool.GetName() == call.Name && tool.GetParameters() != nil {
+					result.ToolCalls[i].Arguments = normalizeNativeArguments(result.ToolCalls[i].Arguments, tool.GetParameters().AsMap())
+					break
+				}
+			}
 		}
 		if custom[call.Name] {
 			var wrapped struct {
@@ -180,6 +189,15 @@ func runLocalInferenceInvocation(ctx context.Context, invoke *inferencev1.RunInf
 			if json.Unmarshal([]byte(call.Arguments), &wrapped) != nil || wrapped.Input == nil {
 				return fmt.Errorf("custom tool %s requires an input string", call.Name)
 			}
+		}
+		if result.ToolCalls[i].Arguments != call.Arguments {
+			repairedCalls = append(repairedCalls, result.ToolCalls[i])
+		}
+	}
+	if len(repairedCalls) > 0 && len(result.AnthropicNativeContent) > 0 {
+		result.AnthropicNativeContent, err = repairInferenceAnthropicToolInputs(result.AnthropicNativeContent, repairedCalls)
+		if err != nil {
+			return err
 		}
 	}
 	if thinking.Len() > 0 {
@@ -275,7 +293,7 @@ func translateLocalInferenceRequest(request *inferencev1.InferenceStreamRequest)
 		}
 		parameters := map[string]any{"type": "object", "properties": map[string]any{}}
 		if tool.GetParameters() != nil {
-			parameters = tool.GetParameters().AsMap()
+			parameters = nativeFunctionSchema(tool.GetParameters().AsMap())
 		}
 		description := tool.GetDescription()
 		if format := tool.GetCustomToolFormat(); format != nil {

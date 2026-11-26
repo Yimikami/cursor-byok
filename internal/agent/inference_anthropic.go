@@ -1,12 +1,75 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 
 	inferencev1 "cursor-byok/internal/protocodec/gen/inference/v1"
 )
+
+// Cursor executes the normalized structured calls but replays the native block
+// array on its next invocation. Keep only repaired tool inputs in sync; signed
+// thinking and all other blocks retain their original bytes and order.
+func repairInferenceAnthropicToolInputs(raw json.RawMessage, repaired []PendingToolCall) (json.RawMessage, error) {
+	if len(repaired) == 0 {
+		return raw, nil
+	}
+	if err := validateProviderToolCalls(repaired); err != nil {
+		return nil, err
+	}
+	byID := make(map[string]PendingToolCall, len(repaired))
+	for _, call := range repaired {
+		byID[call.ID] = call
+	}
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(raw, &blocks); err != nil {
+		return nil, errors.New("invalid Anthropic content while repairing tool history")
+	}
+	matched := make(map[string]bool, len(repaired))
+	for i, rawBlock := range blocks {
+		var block struct {
+			Type string `json:"type"`
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(rawBlock, &block); err != nil {
+			return nil, errors.New("invalid Anthropic block while repairing tool history")
+		}
+		call, ok := byID[block.ID]
+		if block.Type != "tool_use" || !ok {
+			continue
+		}
+		if matched[block.ID] || block.Name != call.Name {
+			return nil, errors.New("ambiguous Anthropic tool identity while repairing history")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(rawBlock, &fields); err != nil {
+			return nil, err
+		}
+		fields["input"] = json.RawMessage(call.Arguments)
+		updated, err := json.Marshal(fields)
+		if err != nil {
+			return nil, err
+		}
+		blocks[i] = updated
+		matched[block.ID] = true
+	}
+	if len(matched) != len(repaired) {
+		return nil, errors.New("repaired Anthropic tool call is missing from native history")
+	}
+	var encoded bytes.Buffer
+	encoded.WriteByte('[')
+	for i, block := range blocks {
+		if i > 0 {
+			encoded.WriteByte(',')
+		}
+		encoded.Write(block)
+	}
+	encoded.WriteByte(']')
+	return encoded.Bytes(), nil
+}
 
 // Cursor 3.32.4 preserves ResponseMessage.anthropic_native_content (field12)
 // as CoreMessage.anthropic_native_content (field18) on the next invocation.
@@ -70,12 +133,27 @@ func decodeInferenceAnthropicContent(native *inferencev1.InferenceCoreMessage, m
 		return nil, nil
 	}
 	var reasoning, text, tools []anthropicContentBlock
+	hasAnthropicReasoning := false
 	for _, part := range native.GetReasoningParts() {
+		if !part.GetIsRedacted() && part.GetSignature() == "" {
+			// Generic reasoning (for example OpenAI reasoning_content) is not
+			// an Anthropic thinking block. Keep its position so mixed histories
+			// still consume assistant_part_order correctly, but never forge a
+			// signed block when the user switches providers.
+			reasoning = append(reasoning, anthropicContentBlock{})
+			continue
+		}
+		hasAnthropicReasoning = true
 		block := anthropicContentBlock{Type: "thinking", Thinking: part.GetText(), Signature: part.GetSignature()}
 		if part.GetIsRedacted() {
 			block = anthropicContentBlock{Type: "redacted_thinking", Data: part.GetRedactedData()}
 		}
 		reasoning = append(reasoning, block)
+	}
+	if !hasAnthropicReasoning {
+		// Normal text and tool calls remain in message. Generic reasoning is
+		// retained separately for providers that accept reasoning_content.
+		return nil, nil
 	}
 	if parts := native.GetAssistantTextParts(); len(parts) > 0 {
 		for _, part := range parts {
@@ -117,6 +195,8 @@ func decodeInferenceAnthropicContent(native *inferencev1.InferenceCoreMessage, m
 	for _, block := range blocks {
 		var value map[string]any
 		switch block.Type {
+		case "": // unsigned generic reasoning placeholder
+			continue
 		case "thinking":
 			value = map[string]any{"type": block.Type, "thinking": block.Thinking, "signature": block.Signature}
 		case "redacted_thinking":

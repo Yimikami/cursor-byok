@@ -1,5 +1,7 @@
 # Native Cursor validation
 
+Later acceptance supersedes the historical pending statuses below: [Windows native acceptance](windows-native-20261126.md) and [native services / voice follow-up](native-services-20261126.md). Commit generation, titles, branch names and Tab now stay native. Agent Review defaults to BYOK with explicit Cursor Bugbot opt-in; see [current routing and usage](native-auxiliary-20261126.md). Older route results below describe their recorded implementation.
+
 Tested on macOS with the official Cursor 3.32.4 ARM64 package on 2026-11-25,
 using a disposable Git workspace and the user-configured Provider A `model-a` model.
 No provider keys, account databases or captured private prompts belong in this
@@ -62,6 +64,10 @@ another turn was in progress, but this does not establish subagent or
 Multitask-mode completion.
 
 ## Commit generation, branch names and chat titles
+
+Routing update (2026-11-26): these three features now stay native. The provider
+measurements below describe the earlier implementation, not the current routes.
+See [native-auxiliary-20261126.md](native-auxiliary-20261126.md).
 
 Native protobuf requests were sent through the running TLS proxy to the real
 configured provider, using only a scratch repository diff:

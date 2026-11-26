@@ -69,7 +69,14 @@ Core agent and model endpoints:
 | `/aiserver.v1.AiService/GetDefaultModel`         | default from your configured BYOK models |
 | `/aiserver.v1.AiService/GetDefaultModelNudgeData` | synthetic default-model hint            |
 
-The proxy also handles chat titles, branch/commit generation and BugBot.
+Chat titles, branch names, Tab suggestions and commit-message generation stay
+on Cursor's native services, without BYOK fallback on failure. **Agent Review**
+uses your BYOK model by default; the dashboard can opt into Cursor Bugbot with
+a warning that it consumes the Cursor account's usage and limits. A BYOK review
+failure never silently falls back to Cursor billing. **Fix All Issues** prepares
+a normal Agent prompt and continues through your selected BYOK chat model.
+Plugin marketplace, voice and other hosted features retain native routing and
+Cursor account eligibility.
 Cloud background-agent RPCs and other native requests pass through to Cursor
 with their original authentication and verified upstream TLS. Cloud model
 preferences remain native; local BYOK IDs are not advertised as cloud defaults.
@@ -180,11 +187,27 @@ dashboards.
    - Writes `http.proxy` / `http.proxyStrictSSL: true` and system certificate settings (originals backed up)
    - Preserves your existing Cursor sign-in; recovers legacy account backups if present
    - Temporarily selects your configured BYOK model for local features (original preferences backed up); cloud-agent selections remain native
+   - Enables Cursor's native own-key model menu and opens the configured model list; your account membership stays unchanged and no provider key is copied into Cursor
 7. Open Cursor. Your adapter appears in the model picker. Chat away.
 8. Fully quit Cursor, then click **Stop service**. Proxy state, Cursor settings, auth, and model preferences are restored. Reopen Cursor afterwards.
 
 Cursor caches account and model settings in memory. Keeping it open during Start
 or Stop can hide the updated values or write its cached values back over a restore.
+
+If Cursor already contains a saved but disabled OpenAI key, remove that unused
+key in Cursor Settings before Start. The service refuses to reactivate a key
+you disabled. Its temporary native BYOK preference is restored on Stop along
+with model selections, including recovery of older preference backups.
+
+Recent macOS Cursor versions encrypt their saved session with Keychain. When you
+explicitly start the service, macOS may ask to let cursor-byok access the single
+**Cursor Safe Storage** item (account **Cursor Key**) to verify the local account.
+This is separate from installing the proxy certificate. Choose **Always Allow**
+for the cursor-byok app if you want it to continue checking this account without
+additional prompts: macOS **Allow** grants only one read and is insufficient for
+ongoing ownership checks. Canceling leaves the current routing unchanged. Requests
+and automatic recovery never open this permission dialog. macOS builds require
+CGO for this integration.
 
 If setup fails, the service restores changes already made and reports the failing
 step. If restoration fails, it keeps the listener available and retains the

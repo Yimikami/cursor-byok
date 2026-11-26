@@ -87,3 +87,6 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+      - name: Dashboard regression tests
+        working-directory: frontend
+        run: npm test

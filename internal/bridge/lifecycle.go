@@ -28,6 +28,7 @@ type proxyLifecycle struct {
 	revertTweaks func() error
 	prepareAuth  func(string) error
 	restoreAuth  func(string) error
+	authAccess   func() error
 	restoreModel func(string) error
 	selectModel  func(string) error
 	enableProxy  func(string) error
@@ -56,8 +57,9 @@ func (s *ProxyService) lifecycleOps() *proxyLifecycle {
 		},
 		applyTweaks:  cursor.ApplyCursorTweaks,
 		revertTweaks: cursor.RevertCursorTweaks,
-		prepareAuth:  cursor.PrepareCursorAuth,
+		prepareAuth:  cursor.PrepareCursorAuthWithoutInteraction,
 		restoreAuth:  cursor.RestoreFakeProUser,
+		authAccess:   cursor.RequestCursorKeychainAccess,
 		selectModel: func(modelID string) error {
 			var knownIDs []string
 			for _, adapter := range s.gatewayAdapters() {
@@ -93,6 +95,10 @@ func RecoverInterruptedSession(s *ProxyService) error {
 }
 
 func (s *ProxyService) recoverInterruptedSessionLocked() error {
+	return s.recoverInterruptedSessionWithAuthLocked(s.lifecycleOps().restoreAuth)
+}
+
+func (s *ProxyService) recoverInterruptedSessionWithAuthLocked(restoreAuth func(string) error) error {
 	ops := s.lifecycleOps()
 	var cleanup []error
 	var routingPending bool
@@ -107,7 +113,7 @@ func (s *ProxyService) recoverInterruptedSessionLocked() error {
 	if err := ops.restoreModel(s.modelBackupPath()); err != nil {
 		cleanup = append(cleanup, fmt.Errorf("restore Cursor models: %w", err))
 	}
-	if err := ops.restoreAuth(s.authBackupPath()); err != nil {
+	if err := restoreAuth(s.authBackupPath()); err != nil {
 		cleanup = append(cleanup, fmt.Errorf("restore Cursor auth: %w", err))
 	}
 	return s.finishRecoveryLocked(routingPending, cleanup)
@@ -147,15 +153,24 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 		s.state.LastError = err.Error()
 		return s.state, err
 	}
+	ops := s.lifecycleOps()
+	var permission cursor.CursorKeychainPermissionAttempt
+	runAuth := func(action func() error) error {
+		return permission.Run(action, ops.authAccess)
+	}
 	if s.recoveryPending {
-		if err := s.recoverInterruptedSessionLocked(); err != nil {
+		// Automatic startup recovery may have retained an encrypted legacy
+		// session because Keychain access was denied. This explicit Start can
+		// request access to finish that recovery before applying new routing.
+		if err := s.recoverInterruptedSessionWithAuthLocked(func(path string) error {
+			return runAuth(func() error { return ops.restoreAuth(path) })
+		}); err != nil {
 			return s.state, err
 		}
 	}
 	if s.state.Running {
 		return s.state, nil
 	}
-	ops := s.lifecycleOps()
 	s.state.CAInstalled = ops.caInstalled()
 	// Linux also supports a manual system-store import that the NSS probe
 	// cannot inspect. Windows and macOS have a single supported trust path.
@@ -217,13 +232,16 @@ func (s *ProxyService) StartProxy() (ProxyState, error) {
 	// Complete Cursor's prerequisites before routing other applications
 	// through this process. Failed operations may have partially written,
 	// so their restoration is attempted too.
+	// Verify encrypted account access before modifying either Cursor's proxy
+	// preferences or the system proxy. Only this explicit Start may request
+	// Keychain permission; automatic recovery and request guards never do.
+	authAttempted = true
+	if err := runAuth(func() error { return ops.prepareAuth(s.authBackupPath()) }); err != nil {
+		return rollback(fmt.Errorf("configure Cursor auth: %w", err))
+	}
 	tweaksAttempted = true
 	if err := ops.applyTweaks(s.state.ListenAddr); err != nil {
 		return rollback(fmt.Errorf("configure Cursor settings: %w", err))
-	}
-	authAttempted = true
-	if err := ops.prepareAuth(s.authBackupPath()); err != nil {
-		return rollback(fmt.Errorf("configure Cursor auth: %w", err))
 	}
 	proxyAttempted = true
 	if err := ops.enableProxy(s.state.ListenAddr); err != nil {

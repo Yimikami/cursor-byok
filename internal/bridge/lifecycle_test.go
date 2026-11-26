@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"cursor-byok/internal/cursor"
 	"cursor-byok/internal/relay"
 )
 
@@ -45,6 +46,7 @@ func testLifecycle(t *testing.T) (*ProxyService, *[]string, map[string]error) {
 			revertTweaks: func() error { return run("restore-settings") },
 			prepareAuth:  func(string) error { return run("auth") },
 			restoreAuth:  func(string) error { return run("restore-auth") },
+			authAccess:   func() error { return run("auth-access") },
 			selectModel:  func(string) error { return run("model") },
 			restoreModel: func(string) error { return run("restore-model") },
 			enableProxy:  func(string) error { return run("proxy") },
@@ -93,10 +95,10 @@ func TestStartProxyRollsBackEachFailedStep(t *testing.T) {
 	}{
 		{"create", []string{"create"}},
 		{"listen", []string{"create", "listen"}},
-		{"settings", []string{"create", "listen", "settings", "restore-settings", "close"}},
-		{"auth", []string{"create", "listen", "settings", "auth", "restore-settings", "restore-auth", "close"}},
-		{"model", []string{"create", "listen", "settings", "auth", "proxy", "model", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}},
-		{"proxy", []string{"create", "listen", "settings", "auth", "proxy", "restore-proxy", "restore-settings", "restore-auth", "close"}},
+		{"settings", []string{"create", "listen", "auth", "settings", "restore-settings", "restore-auth", "close"}},
+		{"auth", []string{"create", "listen", "auth", "restore-auth", "close"}},
+		{"model", []string{"create", "listen", "auth", "settings", "proxy", "model", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}},
+		{"proxy", []string{"create", "listen", "auth", "settings", "proxy", "restore-proxy", "restore-settings", "restore-auth", "close"}},
 	} {
 		t.Run(tt.step, func(t *testing.T) {
 			s, events, failures := testLifecycle(t)
@@ -121,6 +123,115 @@ func TestFailedProxyRollbackKeepsListenerUntilStopRetry(t *testing.T) {
 	state, err = s.StopProxy()
 	if err != nil || state.Running || s.proxy != nil || (*events)[len(*events)-1] != "close" {
 		t.Fatalf("state=%+v err=%v events=%v", state, err, *events)
+	}
+}
+
+func TestAuthPreflightFailureLeavesRoutingUntouchedAndCanRetry(t *testing.T) {
+	s, events, failures := testLifecycle(t)
+	denied := errors.New("Cursor Safe Storage is unavailable without Keychain access")
+	failures["auth"] = denied
+	state, err := s.StartProxy()
+	want := []string{"create", "listen", "auth", "restore-auth", "close"}
+	if !errors.Is(err, denied) || state.Running || s.proxy != nil || state.LastError == "" || !reflect.DeepEqual(*events, want) {
+		t.Fatalf("failed auth preflight changed routing or hid its error: state=%+v err=%v events=%v", state, err, *events)
+	}
+	// An explicit retry after access becomes available should perform the
+	// preflight again and only then apply either proxy configuration.
+	delete(failures, "auth")
+	*events = nil
+	state, err = s.StartProxy()
+	want = []string{"create", "listen", "auth", "settings", "proxy", "model"}
+	if err != nil || !state.Running || state.LastError != "" || !reflect.DeepEqual(*events, want) {
+		t.Fatalf("auth preflight retry failed: state=%+v err=%v events=%v", state, err, *events)
+	}
+}
+
+func TestExplicitStartAuthorizesPendingAuthRecovery(t *testing.T) {
+	s, events, failures := testLifecycle(t)
+	denied := &cursor.CursorKeychainAccessError{Status: -25308}
+	failures["restore-auth"] = denied
+	if err := RecoverInterruptedSession(s); !errors.Is(err, denied) || !s.recoveryPending {
+		t.Fatalf("automatic recovery did not retain the denied state: %v", err)
+	}
+	if _, err := s.StopProxy(); !errors.Is(err, denied) {
+		t.Fatalf("noninteractive Stop did not retain the denied state: %v", err)
+	}
+	if strings.Contains(strings.Join(*events, ","), "auth-access") {
+		t.Fatal("automatic recovery or Stop requested Keychain permission")
+	}
+	s.lifecycle.authAccess = func() error {
+		*events = append(*events, "auth-access")
+		delete(failures, "restore-auth")
+		return nil
+	}
+	*events = nil
+	state, err := s.StartProxy()
+	want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth", "auth-access", "restore-auth", "create", "listen", "auth", "settings", "proxy", "model"}
+	if err != nil || !state.Running || s.recoveryPending || !reflect.DeepEqual(*events, want) {
+		t.Fatalf("explicit Start did not authorize recovery before routing: state=%+v err=%v events=%v", state, err, *events)
+	}
+}
+
+func TestPendingAuthRecoveryPermissionDenialRetainsBackupAndRouting(t *testing.T) {
+	s, events, failures := testLifecycle(t)
+	denied := &cursor.CursorKeychainAccessError{Status: -25293}
+	failures["restore-auth"] = denied
+	failures["auth-access"] = denied
+	backup := []byte("fixture legacy recovery data")
+	if err := os.WriteFile(s.authBackupPath(), backup, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverInterruptedSession(s); !errors.Is(err, denied) {
+		t.Fatal("expected noninteractive recovery denial")
+	}
+	*events = nil
+	state, err := s.StartProxy()
+	want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth", "auth-access"}
+	if !errors.Is(err, denied) || state.Running || !s.recoveryPending || s.proxy != nil || !reflect.DeepEqual(*events, want) {
+		t.Fatalf("permission denial changed routing or lost pending recovery: state=%+v err=%v events=%v", state, err, *events)
+	}
+	if got, err := os.ReadFile(s.authBackupPath()); err != nil || string(got) != string(backup) {
+		t.Fatal("denied recovery removed or changed its backup")
+	}
+	*events = nil
+	if _, err := s.StopProxy(); !errors.Is(err, denied) || strings.Contains(strings.Join(*events, ","), "auth-access") {
+		t.Fatalf("Stop repeated the permission request: err=%v events=%v", err, *events)
+	}
+}
+
+func TestExplicitStartSharesPermissionBudgetWithAuthPreflight(t *testing.T) {
+	s, events, failures := testLifecycle(t)
+	denied := &cursor.CursorKeychainAccessError{Status: -25308}
+	failures["restore-auth"] = denied
+	failures["auth"] = denied
+	if err := RecoverInterruptedSession(s); !errors.Is(err, denied) {
+		t.Fatal("expected noninteractive recovery denial")
+	}
+	s.lifecycle.authAccess = func() error {
+		*events = append(*events, "auth-access")
+		delete(failures, "restore-auth")
+		return nil
+	}
+	*events = nil
+	state, err := s.StartProxy()
+	want := []string{"restore-proxy", "restore-settings", "restore-model", "restore-auth", "auth-access", "restore-auth", "create", "listen", "auth", "restore-auth", "close"}
+	if !errors.Is(err, denied) || !strings.Contains(err.Error(), "Always Allow") || state.Running || s.proxy != nil || !reflect.DeepEqual(*events, want) {
+		t.Fatalf("preflight repeated the prompt or enabled routing after denial: state=%+v err=%v events=%v", state, err, *events)
+	}
+}
+
+func TestExplicitStartCanAuthorizeAuthPreflight(t *testing.T) {
+	s, events, failures := testLifecycle(t)
+	failures["auth"] = &cursor.CursorKeychainAccessError{Status: -25308}
+	s.lifecycle.authAccess = func() error {
+		*events = append(*events, "auth-access")
+		delete(failures, "auth")
+		return nil
+	}
+	state, err := s.StartProxy()
+	want := []string{"create", "listen", "auth", "auth-access", "auth", "settings", "proxy", "model"}
+	if err != nil || !state.Running || !reflect.DeepEqual(*events, want) {
+		t.Fatalf("preflight permission did not precede routing: state=%+v err=%v events=%v", state, err, *events)
 	}
 }
 
@@ -181,7 +292,7 @@ func TestStartAfterFailedStopRecoversThenReappliesRouting(t *testing.T) {
 			if failure == "restore-proxy" {
 				want = append(want, "close")
 			}
-			want = append(want, "create", "listen", "settings", "auth", "proxy", "model")
+			want = append(want, "create", "listen", "auth", "settings", "proxy", "model")
 			if err != nil || !state.Running || s.recoveryPending || !reflect.DeepEqual(*events, want) {
 				t.Fatalf("did not reapply routing after recovery: state=%+v err=%v events=%v", state, err, *events)
 			}
@@ -224,7 +335,7 @@ func TestSuccessfulLifecycleNotifiesOutsideLock(t *testing.T) {
 	if _, err := s.StopProxy(); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"create", "listen", "settings", "auth", "proxy", "model", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}
+	want := []string{"create", "listen", "auth", "settings", "proxy", "model", "restore-proxy", "restore-settings", "restore-model", "restore-auth", "close"}
 	if !reflect.DeepEqual(*events, want) || !reflect.DeepEqual(notified, []bool{true, false}) {
 		t.Fatalf("events=%v notified=%v", *events, notified)
 	}
@@ -298,7 +409,7 @@ func TestStartRetriesPendingRecoveryBeforeNewOverrides(t *testing.T) {
 	delete(failures, "restore-proxy")
 	*events = nil
 	state, err = s.StartProxy()
-	want = append(want, "create", "listen", "settings", "auth", "proxy", "model")
+	want = append(want, "create", "listen", "auth", "settings", "proxy", "model")
 	if err != nil || !state.Running || s.recoveryPending || !reflect.DeepEqual(*events, want) {
 		t.Fatalf("state=%+v err=%v pending=%v events=%v", state, err, s.recoveryPending, *events)
 	}
